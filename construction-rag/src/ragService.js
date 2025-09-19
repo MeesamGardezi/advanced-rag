@@ -1,7 +1,6 @@
 /**
- * Graph-Aware RAG Service
- * Uses OpenAI to generate natural language responses from construction data
- * with graph relationship context for enhanced answers
+ * Estimate-Focused RAG Service
+ * Specialized RAG system for construction estimate queries with expert domain knowledge
  */
 
 import OpenAI from 'openai';
@@ -10,7 +9,7 @@ import { getOpenAIConfig } from '../config/openai.js';
 
 dotenv.config();
 
-class RAGService {
+class EstimateRAGService {
   constructor() {
     this.config = getOpenAIConfig();
     this.openai = new OpenAI({
@@ -21,61 +20,161 @@ class RAGService {
     this.embeddingModel = this.config.models.embedding;
     this.completionModel = this.config.models.completion;
     
-    console.log('✅ RAG service initialized');
-    console.log(`🤖 Models: ${this.embeddingModel} | ${this.completionModel}`);
+    // Estimate-specific configuration
+    this.defaultSimilarityThreshold = 0.75; // Higher threshold for better precision
+    this.maxContextItems = 12; // More context for detailed answers
+    this.maxContextTokens = 4500; // Leave room for response
+    
+    console.log('✅ Estimate RAG service initialized');
+    console.log(`🎯 Models: ${this.embeddingModel} | ${this.completionModel}`);
   }
 
-  // Main RAG query method
-  async query(question, db, options = {}) {
+  /**
+   * Main estimate query method with enhanced processing
+   */
+  async queryEstimates(question, db, options = {}) {
     const {
       projectId = null,
-      limit = 10,
-      threshold = this.config.embedding.defaultSimilarityThreshold,
-      includeRelationships = true,
+      limit = this.maxContextItems,
+      threshold = this.defaultSimilarityThreshold,
+      category = null,
+      costCodePattern = null,
       responseStyle = 'detailed',
-      entityType = null,
-      category = null
+      includeAnalysis = true
     } = options;
 
     try {
-      console.log(`🔍 Processing RAG query: "${question}"`);
+      console.log(`🔍 Processing estimate query: "${question}"`);
+      const startTime = Date.now();
       
-      // Step 1: Generate query embedding
+      // Step 1: Classify the query type for specialized handling
+      const queryType = this.classifyEstimateQuery(question);
+      console.log(`📋 Query type: ${queryType}`);
+      
+      // Step 2: Generate query embedding
       const queryEmbedding = await this.generateQueryEmbedding(question);
       
-      // Step 2: Find similar entities
-      const similarEntities = await this.findSimilarEntities(
+      // Step 3: Search for similar estimate entities
+      const searchOptions = {
+        threshold,
+        limit: Math.min(limit * 2, 25), // Get extra for filtering
+        projectId,
+        category,
+        costCodePattern
+      };
+      
+      const similarEntities = await this.findSimilarEstimateEntities(
         queryEmbedding, 
         db, 
-        { projectId, limit, threshold, entityType, category }
+        searchOptions
       );
       
       if (similarEntities.length === 0) {
-        return this.createEmptyResponse(question);
+        return this.createEmptyEstimateResponse(question, queryType);
       }
       
-      // Step 3: Enhance context with relationships if requested
-      let enhancedContext = similarEntities;
-      if (includeRelationships) {
-        enhancedContext = await this.enhanceWithRelationships(similarEntities, db);
-      }
+      // Step 4: Build comprehensive estimate context
+      const context = await this.buildEstimateContext(
+        similarEntities, 
+        question, 
+        queryType, 
+        db, 
+        projectId
+      );
       
-      // Step 4: Build comprehensive context
-      const context = await this.buildContext(enhancedContext, question, db, projectId);
+      // Step 5: Generate expert estimate response
+      const response = await this.generateEstimateResponse(
+        question, 
+        context, 
+        queryType, 
+        responseStyle
+      );
       
-      // Step 5: Generate natural language response
-      const response = await this.generateResponse(question, context, responseStyle);
+      // Step 6: Create structured response with insights
+      const result = this.createEstimateResponse(
+        question, 
+        response, 
+        context, 
+        similarEntities, 
+        queryType, 
+        options
+      );
       
-      // Step 6: Create structured result
-      return this.createResponse(question, response, context, similarEntities, options);
+      const totalDuration = Date.now() - startTime;
+      result.metadata.processingTime = totalDuration;
+      
+      console.log(`✅ Query processed in ${totalDuration}ms`);
+      return result;
       
     } catch (error) {
-      console.error('❌ Error in RAG query:', error.message);
+      console.error('❌ Error in estimate query:', error.message);
       return this.createErrorResponse(question, error);
     }
   }
 
-  // Generate embedding for query
+  /**
+   * Specialized query classification for estimate questions
+   */
+  classifyEstimateQuery(question) {
+    const q = question.toLowerCase();
+    const tokens = q.split(/\s+/);
+    
+    // Cost analysis queries
+    if (tokens.some(t => ['cost', 'price', 'total', 'amount', 'spend'].includes(t))) {
+      if (tokens.some(t => ['budget', 'variance', 'over', 'under'].includes(t))) {
+        return 'budget_variance';
+      }
+      return 'cost_analysis';
+    }
+    
+    // Budget-specific queries
+    if (tokens.some(t => ['budget', 'budgeted', 'allocated', 'planned'].includes(t))) {
+      return 'budget_analysis';
+    }
+    
+    // Quantity and rate queries
+    if (tokens.some(t => ['quantity', 'qty', 'units', 'how', 'much', 'many'].includes(t))) {
+      return 'quantity_analysis';
+    }
+    
+    if (tokens.some(t => ['rate', 'unit', 'per', 'each', 'hourly'].includes(t))) {
+      return 'rate_analysis';
+    }
+    
+    // Category queries
+    if (tokens.some(t => ['material', 'materials', 'supply', 'supplies'].includes(t))) {
+      return 'material_analysis';
+    }
+    
+    if (tokens.some(t => ['labor', 'work', 'worker', 'crew'].includes(t))) {
+      return 'labor_analysis';
+    }
+    
+    if (tokens.some(t => ['subcontractor', 'sub', 'contractor', 'specialist'].includes(t))) {
+      return 'subcontractor_analysis';
+    }
+    
+    // Scope and area queries
+    if (tokens.some(t => ['area', 'scope', 'task', 'location', 'where'].includes(t))) {
+      return 'scope_analysis';
+    }
+    
+    // Comparison queries
+    if (tokens.some(t => ['compare', 'comparison', 'vs', 'versus', 'different', 'difference'].includes(t))) {
+      return 'comparison_analysis';
+    }
+    
+    // Summary queries
+    if (tokens.some(t => ['summary', 'total', 'overview', 'breakdown'].includes(t))) {
+      return 'summary_analysis';
+    }
+    
+    return 'general_estimate';
+  }
+
+  /**
+   * Generate embedding for query with error handling
+   */
   async generateQueryEmbedding(question) {
     try {
       const response = await this.openai.embeddings.create({
@@ -91,36 +190,38 @@ class RAGService {
     }
   }
 
-  // Find similar entities using vector search
-  async findSimilarEntities(queryEmbedding, db, options) {
-    const { projectId, limit, threshold, entityType, category } = options;
+  /**
+   * Find similar estimate entities with enhanced filtering
+   */
+  async findSimilarEstimateEntities(queryEmbedding, db, options) {
+    const { threshold, limit, projectId, category, costCodePattern } = options;
     
     try {
-      // Base similarity search
-      let results = await db.searchSimilarEntities(queryEmbedding, threshold, limit * 2);
+      // Perform vector similarity search
+      let results = await db.searchSimilarEntities(queryEmbedding, threshold, limit);
       
       // Apply filters
       if (projectId) {
         results = results.filter(r => r.project_id === projectId);
       }
       
-      if (entityType) {
-        results = results.filter(r => r.entity_type === entityType);
-      }
-      
       if (category) {
         results = results.filter(r => r.category === category);
       }
       
-      // Limit final results
-      results = results.slice(0, limit);
+      if (costCodePattern) {
+        const pattern = new RegExp(costCodePattern, 'i');
+        results = results.filter(r => pattern.test(r.cost_code || ''));
+      }
       
-      // Enhance with additional scoring
+      // Enhance results with additional scoring and metadata
       return results.map(result => ({
         ...result,
         similarity: parseFloat(result.similarity),
-        relevanceScore: this.calculateRelevanceScore(result, queryEmbedding),
-        contextScore: this.calculateContextScore(result)
+        similarityPercent: Math.round(parseFloat(result.similarity) * 100),
+        estimateRelevance: this.calculateEstimateRelevance(result),
+        budgetHealth: this.calculateBudgetHealth(result),
+        costPerUnit: this.calculateCostPerUnit(result)
       }));
       
     } catch (error) {
@@ -129,61 +230,124 @@ class RAGService {
     }
   }
 
-  // Enhance context with graph relationships
-  async enhanceWithRelationships(entities, db) {
-    try {
-      const enhancedEntities = [];
-      
-      for (const entity of entities) {
-        // Get relationships for this entity
-        const relationships = await db.getEntityRelationships(entity.id);
-        
-        // Add relationship context
-        const enhancedEntity = {
-          ...entity,
-          relationships: relationships,
-          relationshipCount: relationships.length,
-          relationshipTypes: [...new Set(relationships.map(r => r.type))]
-        };
-        
-        enhancedEntities.push(enhancedEntity);
-      }
-      
-      console.log(`🔗 Enhanced ${enhancedEntities.length} entities with relationship context`);
-      return enhancedEntities;
-      
-    } catch (error) {
-      console.error('❌ Error enhancing with relationships:', error.message);
-      return entities; // Fall back to original entities
+  /**
+   * Calculate estimate-specific relevance score
+   */
+  calculateEstimateRelevance(result) {
+    let score = parseFloat(result.similarity) || 0;
+    
+    // Boost for items with good financial data
+    if (result.total_amount > 0) score += 0.05;
+    if (result.budgeted_amount > 0) score += 0.05;
+    
+    // Boost for high-value items (often more important)
+    const amount = result.total_amount || 0;
+    if (amount > 5000) score += 0.05;
+    if (amount > 25000) score += 0.1;
+    
+    // Boost for items with significant variance (more interesting)
+    if (result.budgeted_amount > 0) {
+      const variance = Math.abs(amount - result.budgeted_amount);
+      const variancePercent = (variance / result.budgeted_amount) * 100;
+      if (variancePercent > 15) score += 0.08;
+      if (variancePercent > 30) score += 0.12;
     }
+    
+    // Boost for complete data
+    if (result.cost_code && result.cost_code.length > 2) score += 0.03;
+    if (result.description && result.description.length > 10) score += 0.03;
+    if (result.task_scope) score += 0.02;
+    
+    return Math.min(score, 1.0);
   }
 
-  // Build comprehensive context for the LLM
-  async buildContext(entities, question, db, projectId) {
+  /**
+   * Calculate budget health indicator
+   */
+  calculateBudgetHealth(result) {
+    if (!result.budgeted_amount || result.budgeted_amount <= 0) {
+      return { status: 'no_budget', variance: 0, variancePercent: 0 };
+    }
+    
+    const variance = (result.total_amount || 0) - result.budgeted_amount;
+    const variancePercent = (variance / result.budgeted_amount) * 100;
+    
+    let status = 'on_budget';
+    if (Math.abs(variancePercent) <= 5) status = 'on_budget';
+    else if (variance > 0 && variancePercent <= 20) status = 'over_budget';
+    else if (variance > 0) status = 'significantly_over';
+    else if (variance < 0 && variancePercent >= -20) status = 'under_budget';
+    else status = 'significantly_under';
+    
+    return {
+      status,
+      variance,
+      variancePercent,
+      budgeted: result.budgeted_amount,
+      actual: result.total_amount || 0
+    };
+  }
+
+  /**
+   * Calculate cost per unit if possible
+   */
+  calculateCostPerUnit(result) {
+    const qty = result.qty || (result.raw_data ? result.raw_data.qty : 0);
+    const amount = result.total_amount || 0;
+    const units = result.units || (result.raw_data ? result.raw_data.units : 'ea');
+    
+    if (qty > 0 && amount > 0) {
+      return {
+        value: amount / qty,
+        units: units,
+        formattedValue: `$${(amount / qty).toFixed(2)}/${units}`
+      };
+    }
+    
+    return null;
+  }
+
+  /**
+   * Build comprehensive context for estimate queries
+   */
+  async buildEstimateContext(entities, question, queryType, db, projectId) {
     try {
-      // Basic context from entities
       const context = {
         question,
+        queryType,
         totalEntities: entities.length,
-        entities: entities.map(this.formatEntityForContext.bind(this)),
         
-        // Analysis summaries
-        categories: this.analyzeCategoriesByCount(entities),
-        costCodes: this.analyzeCostCodes(entities),
+        // Core entity data
+        entities: entities.slice(0, this.maxContextItems).map(this.formatEntityForContext.bind(this)),
+        
+        // Financial analysis
         financialSummary: this.calculateFinancialSummary(entities),
         
-        // Relationship insights
-        relationships: this.analyzeRelationships(entities),
+        // Category breakdown
+        categoryAnalysis: this.analyzeCategoriesByFinancials(entities),
+        
+        // Cost code analysis
+        costCodeAnalysis: this.analyzeCostCodes(entities),
+        
+        // Budget performance
+        budgetPerformance: this.analyzeBudgetPerformance(entities),
+        
+        // High-value and problem items
+        highValueItems: this.identifyHighValueItems(entities),
+        varianceItems: this.identifyVarianceItems(entities),
         
         // Query insights
-        queryType: this.classifyQuery(question),
-        keyTerms: this.extractKeyTerms(question)
+        queryInsights: this.extractQueryInsights(question, queryType)
       };
       
       // Add project context if available
       if (projectId) {
-        const projectStats = await db.getProjectStats(projectId);
-        context.projectContext = projectStats;
+        try {
+          const projectStats = await db.getProjectStats(projectId);
+          context.projectContext = projectStats;
+        } catch (error) {
+          console.warn('Could not fetch project context:', error.message);
+        }
       }
       
       return context;
@@ -194,52 +358,348 @@ class RAGService {
     }
   }
 
-  // Format entity for context
+  /**
+   * Format entity for LLM context
+   */
   formatEntityForContext(entity) {
+    const budgetHealth = this.calculateBudgetHealth(entity);
+    
     return {
-      id: entity.id,
-      type: entity.entity_type,
       costCode: entity.cost_code,
       description: entity.description,
       category: entity.category,
+      area: entity.area,
+      taskScope: entity.task_scope,
+      
+      // Financial data
       amount: entity.total_amount,
-      budgetedAmount: entity.budgeted_amount,
-      variance: entity.total_amount - (entity.budgeted_amount || 0),
-      similarity: Math.round(entity.similarity * 100),
+      budgeted: entity.budgeted_amount,
+      variance: budgetHealth.variance,
+      variancePercent: budgetHealth.variancePercent,
+      budgetStatus: budgetHealth.status,
       
-      // Relationship context
-      relationshipCount: entity.relationshipCount || 0,
-      relationshipTypes: entity.relationshipTypes || [],
+      // Quantities
+      qty: entity.qty,
+      units: entity.units,
+      rate: entity.rate,
+      costPerUnit: this.calculateCostPerUnit(entity),
       
-      // Key content excerpts
-      contentExcerpt: entity.content ? entity.content.substring(0, 200) + '...' : '',
-      
-      // Context scores
-      relevanceScore: Math.round((entity.relevanceScore || 0) * 100),
-      contextScore: Math.round((entity.contextScore || 0) * 100)
+      // Relevance
+      similarity: entity.similarityPercent,
+      relevance: Math.round(entity.estimateRelevance * 100)
     };
   }
 
-  // Generate natural language response using OpenAI
-  async generateResponse(question, context, responseStyle) {
+  /**
+   * Calculate comprehensive financial summary
+   */
+  calculateFinancialSummary(entities) {
+    const summary = {
+      totalEstimated: 0,
+      totalBudgeted: 0,
+      totalVariance: 0,
+      itemCount: entities.length,
+      averageAmount: 0,
+      medianAmount: 0,
+      largestItem: 0,
+      smallestItem: Infinity
+    };
+    
+    const amounts = [];
+    
+    entities.forEach(entity => {
+      const amount = entity.total_amount || 0;
+      const budgeted = entity.budgeted_amount || 0;
+      
+      summary.totalEstimated += amount;
+      summary.totalBudgeted += budgeted;
+      
+      if (amount > 0) {
+        amounts.push(amount);
+        summary.largestItem = Math.max(summary.largestItem, amount);
+        summary.smallestItem = Math.min(summary.smallestItem, amount);
+      }
+    });
+    
+    summary.totalVariance = summary.totalEstimated - summary.totalBudgeted;
+    summary.totalVariancePercent = summary.totalBudgeted > 0 
+      ? (summary.totalVariance / summary.totalBudgeted) * 100 
+      : 0;
+    
+    if (amounts.length > 0) {
+      summary.averageAmount = amounts.reduce((sum, amt) => sum + amt, 0) / amounts.length;
+      amounts.sort((a, b) => a - b);
+      summary.medianAmount = amounts[Math.floor(amounts.length / 2)];
+    } else {
+      summary.smallestItem = 0;
+    }
+    
+    return summary;
+  }
+
+  /**
+   * Analyze categories with financial details
+   */
+  analyzeCategoriesByFinancials(entities) {
+    const analysis = {};
+    
+    entities.forEach(entity => {
+      const category = entity.category || 'other';
+      
+      if (!analysis[category]) {
+        analysis[category] = {
+          count: 0,
+          totalAmount: 0,
+          totalBudgeted: 0,
+          averageAmount: 0,
+          items: []
+        };
+      }
+      
+      analysis[category].count++;
+      analysis[category].totalAmount += entity.total_amount || 0;
+      analysis[category].totalBudgeted += entity.budgeted_amount || 0;
+      analysis[category].items.push({
+        costCode: entity.cost_code,
+        amount: entity.total_amount || 0
+      });
+    });
+    
+    // Calculate averages and sort items
+    Object.keys(analysis).forEach(category => {
+      const cat = analysis[category];
+      cat.averageAmount = cat.count > 0 ? cat.totalAmount / cat.count : 0;
+      cat.variance = cat.totalAmount - cat.totalBudgeted;
+      cat.variancePercent = cat.totalBudgeted > 0 
+        ? (cat.variance / cat.totalBudgeted) * 100 
+        : 0;
+      cat.items.sort((a, b) => (b.amount || 0) - (a.amount || 0));
+      cat.items = cat.items.slice(0, 3); // Keep top 3
+    });
+    
+    return analysis;
+  }
+
+  /**
+   * Analyze cost codes with aggregation
+   */
+  analyzeCostCodes(entities) {
+    const analysis = {};
+    
+    entities.forEach(entity => {
+      const costCode = entity.cost_code || 'NO_CODE';
+      
+      if (!analysis[costCode]) {
+        analysis[costCode] = {
+          count: 0,
+          totalAmount: 0,
+          totalBudgeted: 0,
+          category: entity.category,
+          descriptions: new Set()
+        };
+      }
+      
+      analysis[costCode].count++;
+      analysis[costCode].totalAmount += entity.total_amount || 0;
+      analysis[costCode].totalBudgeted += entity.budgeted_amount || 0;
+      
+      if (entity.description) {
+        analysis[costCode].descriptions.add(entity.description);
+      }
+    });
+    
+    // Convert Set to Array and calculate variance
+    Object.keys(analysis).forEach(costCode => {
+      const code = analysis[costCode];
+      code.descriptions = Array.from(code.descriptions).slice(0, 2); // Max 2 descriptions
+      code.variance = code.totalAmount - code.totalBudgeted;
+      code.variancePercent = code.totalBudgeted > 0 
+        ? (code.variance / code.totalBudgeted) * 100 
+        : 0;
+    });
+    
+    return analysis;
+  }
+
+  /**
+   * Analyze overall budget performance
+   */
+  analyzeBudgetPerformance(entities) {
+    const performance = {
+      totalItems: entities.length,
+      itemsWithBudget: 0,
+      onBudget: 0,
+      overBudget: 0,
+      underBudget: 0,
+      significantVariance: 0,
+      averageVariancePercent: 0
+    };
+    
+    let totalVariancePercent = 0;
+    let itemsWithVariance = 0;
+    
+    entities.forEach(entity => {
+      if (entity.budgeted_amount > 0) {
+        performance.itemsWithBudget++;
+        
+        const budgetHealth = this.calculateBudgetHealth(entity);
+        
+        switch (budgetHealth.status) {
+          case 'on_budget':
+            performance.onBudget++;
+            break;
+          case 'over_budget':
+          case 'significantly_over':
+            performance.overBudget++;
+            if (budgetHealth.status === 'significantly_over') {
+              performance.significantVariance++;
+            }
+            break;
+          case 'under_budget':
+          case 'significantly_under':
+            performance.underBudget++;
+            if (budgetHealth.status === 'significantly_under') {
+              performance.significantVariance++;
+            }
+            break;
+        }
+        
+        totalVariancePercent += Math.abs(budgetHealth.variancePercent);
+        itemsWithVariance++;
+      }
+    });
+    
+    if (itemsWithVariance > 0) {
+      performance.averageVariancePercent = totalVariancePercent / itemsWithVariance;
+    }
+    
+    return performance;
+  }
+
+  /**
+   * Identify high-value items
+   */
+  identifyHighValueItems(entities) {
+    return entities
+      .filter(entity => (entity.total_amount || 0) > 5000)
+      .sort((a, b) => (b.total_amount || 0) - (a.total_amount || 0))
+      .slice(0, 5)
+      .map(entity => ({
+        costCode: entity.cost_code,
+        description: entity.description,
+        amount: entity.total_amount,
+        category: entity.category,
+        budgetHealth: this.calculateBudgetHealth(entity)
+      }));
+  }
+
+  /**
+   * Identify items with significant variance
+   */
+  identifyVarianceItems(entities) {
+    return entities
+      .filter(entity => {
+        if (!entity.budgeted_amount || entity.budgeted_amount <= 0) return false;
+        
+        const variance = Math.abs((entity.total_amount || 0) - entity.budgeted_amount);
+        const variancePercent = (variance / entity.budgeted_amount) * 100;
+        
+        return variancePercent > 20 || variance > 2000;
+      })
+      .sort((a, b) => {
+        const aVariance = Math.abs((a.total_amount || 0) - (a.budgeted_amount || 0));
+        const bVariance = Math.abs((b.total_amount || 0) - (b.budgeted_amount || 0));
+        return bVariance - aVariance;
+      })
+      .slice(0, 5)
+      .map(entity => {
+        const budgetHealth = this.calculateBudgetHealth(entity);
+        return {
+          costCode: entity.cost_code,
+          description: entity.description,
+          estimated: entity.total_amount,
+          budgeted: entity.budgeted_amount,
+          variance: budgetHealth.variance,
+          variancePercent: budgetHealth.variancePercent,
+          category: entity.category
+        };
+      });
+  }
+
+  /**
+   * Extract insights from the query
+   */
+  extractQueryInsights(question, queryType) {
+    const insights = {
+      queryType,
+      keyTerms: this.extractKeyTerms(question),
+      focusAreas: [],
+      suggestedAnalysis: []
+    };
+    
+    const q = question.toLowerCase();
+    
+    // Identify focus areas
+    if (q.includes('material')) insights.focusAreas.push('materials');
+    if (q.includes('labor')) insights.focusAreas.push('labor');
+    if (q.includes('budget')) insights.focusAreas.push('budget_variance');
+    if (q.includes('cost')) insights.focusAreas.push('cost_analysis');
+    
+    // Suggest related analysis based on query type
+    switch (queryType) {
+      case 'cost_analysis':
+        insights.suggestedAnalysis = ['budget_comparison', 'category_breakdown', 'high_value_items'];
+        break;
+      case 'budget_variance':
+        insights.suggestedAnalysis = ['variance_items', 'budget_performance', 'cost_overruns'];
+        break;
+      case 'material_analysis':
+        insights.suggestedAnalysis = ['material_costs', 'supplier_analysis', 'quantity_efficiency'];
+        break;
+      default:
+        insights.suggestedAnalysis = ['cost_summary', 'budget_health', 'category_breakdown'];
+    }
+    
+    return insights;
+  }
+
+  /**
+   * Extract key terms from question
+   */
+  extractKeyTerms(question) {
+    const terms = question.toLowerCase()
+      .replace(/[^\w\s]/g, ' ')
+      .split(/\s+/)
+      .filter(term => 
+        term.length > 3 && 
+        !['what', 'when', 'where', 'which', 'this', 'that', 'with', 'from', 'they', 'have', 'will', 'been'].includes(term)
+      );
+    
+    return [...new Set(terms)].slice(0, 8);
+  }
+
+  /**
+   * Generate expert estimate response using OpenAI
+   */
+  async generateEstimateResponse(question, context, queryType, responseStyle) {
     try {
-      const prompt = this.buildPrompt(question, context, responseStyle);
+      const prompt = this.buildEstimatePrompt(question, context, queryType, responseStyle);
       
       const response = await this.openai.chat.completions.create({
         model: this.completionModel,
         messages: [
           {
             role: 'system',
-            content: this.config.prompts.system.construction_expert
+            content: this.getSystemPrompt(queryType)
           },
           {
             role: 'user', 
             content: prompt
           }
         ],
-        temperature: this.config.completion.temperature,
-        max_tokens: this.config.completion.maxTokens,
-        top_p: this.config.completion.topP
+        temperature: 0.1, // Low temperature for consistent, factual responses
+        max_tokens: 900,
+        top_p: 0.9
       });
       
       return response.choices[0].message.content.trim();
@@ -250,321 +710,284 @@ class RAGService {
     }
   }
 
-  // Build optimized prompt for construction queries
-  buildPrompt(question, context, responseStyle) {
-    const { entities, categories, costCodes, financialSummary, queryType } = context;
+  /**
+   * Get specialized system prompt based on query type
+   */
+  getSystemPrompt(queryType) {
+    const basePrompt = "You are an expert construction estimator and cost analyst with deep knowledge of project budgeting, cost codes, and construction economics.";
     
-    let prompt = `Based on the construction project data below, please provide a comprehensive answer to the user's question.
+    const specializations = {
+      'cost_analysis': " Focus on detailed cost breakdowns, unit pricing, and financial implications.",
+      'budget_variance': " Emphasize budget performance, variance analysis, and cost control recommendations.",
+      'material_analysis': " Concentrate on material costs, quantities, procurement, and supply chain insights.",
+      'labor_analysis': " Focus on labor costs, productivity, crew efficiency, and workforce planning.",
+      'rate_analysis': " Emphasize unit rates, pricing benchmarks, and cost-per-unit analysis."
+    };
+    
+    return basePrompt + (specializations[queryType] || " Provide comprehensive construction cost insights.");
+  }
+
+  /**
+   * Build specialized prompt for estimate queries
+   */
+  buildEstimatePrompt(question, context, queryType, responseStyle) {
+    const { entities, financialSummary, categoryAnalysis, budgetPerformance, highValueItems, varianceItems } = context;
+    
+    let prompt = `Based on the construction estimate data below, provide a comprehensive answer to this question about project costs:
 
 QUESTION: ${question}
-
 QUERY TYPE: ${queryType}
 
-RELEVANT DATA FOUND:
-- ${entities.length} relevant construction items found
-- Categories: ${Object.keys(categories).join(', ')}
-- Cost codes: ${Object.keys(costCodes).slice(0, 10).join(', ')}${Object.keys(costCodes).length > 10 ? '...' : ''}
-- Total value: $${(financialSummary.totalAmount || 0).toLocaleString()}
+FINANCIAL SUMMARY:
+- Total Estimated Cost: $${financialSummary.totalEstimated.toLocaleString()}
+- Total Budgeted Cost: $${financialSummary.totalBudgeted.toLocaleString()}
+- Overall Variance: ${financialSummary.totalVariance >= 0 ? '+' : ''}$${financialSummary.totalVariance.toLocaleString()} (${financialSummary.totalVariancePercent.toFixed(1)}%)
+- Items Analyzed: ${entities.length}
 
-DETAILED DATA:
-`;
+BUDGET PERFORMANCE:
+- Items with Budget Data: ${budgetPerformance.itemsWithBudget}/${budgetPerformance.totalItems}
+- On Budget: ${budgetPerformance.onBudget} items
+- Over Budget: ${budgetPerformance.overBudget} items  
+- Under Budget: ${budgetPerformance.underBudget} items
+- Significant Variances: ${budgetPerformance.significantVariance} items`;
 
-    // Add entity details based on query type
-    if (queryType === 'cost_analysis' || queryType === 'financial') {
-      prompt += this.buildFinancialDataSection(entities, financialSummary);
-    } else if (queryType === 'comparison') {
-      prompt += this.buildComparisonDataSection(entities);
+    // Add category breakdown
+    if (Object.keys(categoryAnalysis).length > 0) {
+      prompt += `\n\nCOST BY CATEGORY:`;
+      Object.entries(categoryAnalysis)
+        .sort(([,a], [,b]) => (b.totalAmount || 0) - (a.totalAmount || 0))
+        .slice(0, 5)
+        .forEach(([category, data]) => {
+          prompt += `\n- ${category.toUpperCase()}: $${data.totalAmount.toLocaleString()} (${data.count} items, avg: $${Math.round(data.averageAmount).toLocaleString()})`;
+          if (data.variance !== 0) {
+            prompt += ` | Variance: ${data.variance >= 0 ? '+' : ''}$${data.variance.toLocaleString()}`;
+          }
+        });
+    }
+
+    // Add high-value items
+    if (highValueItems.length > 0) {
+      prompt += `\n\nHIGHEST VALUE ITEMS:`;
+      highValueItems.slice(0, 3).forEach((item, i) => {
+        prompt += `\n${i+1}. ${item.costCode}: ${item.description} - $${item.amount.toLocaleString()}`;
+        if (item.budgetHealth.budgeted > 0) {
+          prompt += ` (Budget: $${item.budgetHealth.budgeted.toLocaleString()}, ${item.budgetHealth.variancePercent.toFixed(1)}% variance)`;
+        }
+      });
+    }
+
+    // Add variance items if relevant
+    if (varianceItems.length > 0 && (queryType.includes('budget') || queryType.includes('variance'))) {
+      prompt += `\n\nLARGEST VARIANCES:`;
+      varianceItems.slice(0, 3).forEach((item, i) => {
+        prompt += `\n${i+1}. ${item.costCode}: ${item.variancePercent >= 0 ? '+' : ''}${item.variancePercent.toFixed(1)}% (${item.variancePercent >= 0 ? '+' : ''}$${item.variance.toLocaleString()})`;
+      });
+    }
+
+    // Add detailed item data
+    prompt += `\n\nDETAILED ESTIMATE ITEMS:`;
+    entities.slice(0, 6).forEach((item, i) => {
+      prompt += `\n${i+1}. ${item.costCode} - ${item.category.toUpperCase()}`;
+      prompt += `\n   Description: ${item.description}`;
+      prompt += `\n   Cost: $${item.amount.toLocaleString()}${item.budgeted ? ` (Budgeted: $${item.budgeted.toLocaleString()})` : ''}`;
+      if (item.qty && item.units) {
+        prompt += `\n   Quantity: ${item.qty} ${item.units}${item.rate ? ` @ $${item.rate.toFixed(2)}/${item.units}` : ''}`;
+      }
+      if (item.variance !== 0 && item.budgeted) {
+        prompt += `\n   Budget Status: ${item.budgetStatus} (${item.variancePercent.toFixed(1)}% variance)`;
+      }
+      prompt += `\n`;
+    });
+
+    // Add specific instructions based on response style and query type
+    prompt += `\n\nANALYSIS REQUIREMENTS:`;
+    if (responseStyle === 'detailed') {
+      prompt += `\n- Provide comprehensive cost analysis with specific dollar amounts and percentages`;
+      prompt += `\n- Explain budget variances and their potential causes`;
+      prompt += `\n- Include actionable insights for project management`;
+      prompt += `\n- Reference specific cost codes and categories`;
     } else {
-      prompt += this.buildGeneralDataSection(entities);
+      prompt += `\n- Provide concise but informative cost summary`;
+      prompt += `\n- Focus on key financial insights and critical variances`;
     }
 
-    // Add relationship insights if available
-    if (context.relationships && context.relationships.totalRelationships > 0) {
-      prompt += `\nRELATIONSHIP INSIGHTS:
-- ${context.relationships.totalRelationships} relationships found
-- Common connections: ${context.relationships.commonTypes.join(', ')}`;
+    // Add query-specific instructions
+    switch (queryType) {
+      case 'cost_analysis':
+        prompt += `\n- Break down costs by category and identify major cost drivers`;
+        break;
+      case 'budget_variance':
+        prompt += `\n- Focus on budget performance and explain significant variances`;
+        break;
+      case 'material_analysis':
+        prompt += `\n- Concentrate on material costs, quantities, and procurement insights`;
+        break;
+      case 'labor_analysis':
+        prompt += `\n- Focus on labor costs, productivity, and crew efficiency`;
+        break;
     }
 
-    // Add instructions based on response style
-    prompt += `\n\nINSTRUCTIONS:
-- Provide specific dollar amounts, cost codes, and percentages when available
-- ${responseStyle === 'brief' ? 'Keep the response concise and focused' : 'Provide detailed analysis with explanations'}
-- Mention relevant cost codes and categories
-- If discussing costs, include budget vs actual analysis when applicable
-- Structure the response with clear sections if covering multiple aspects
-- Use actual data from the search results, don't make up numbers
-
-RESPONSE:`;
+    prompt += `\n\nRESPONSE FORMAT:`;
+    prompt += `\n- Use specific dollar amounts and percentages from the data`;
+    prompt += `\n- Structure with clear headers and bullet points`;
+    prompt += `\n- Provide actionable recommendations where appropriate`;
+    prompt += `\n- Maintain professional construction industry terminology`;
 
     return prompt;
   }
 
-  // Build financial data section for prompt
-  buildFinancialDataSection(entities, financialSummary) {
-    let section = `\nFINANCIAL DATA BREAKDOWN:\n`;
-    
-    section += `Total Amount: $${(financialSummary.totalAmount || 0).toLocaleString()}\n`;
-    if (financialSummary.totalBudgeted > 0) {
-      section += `Total Budgeted: $${financialSummary.totalBudgeted.toLocaleString()}\n`;
-      section += `Variance: $${(financialSummary.totalVariance || 0).toLocaleString()}\n`;
-    }
-    
-    // Top cost items
-    const topItems = entities
-      .filter(e => e.amount > 0)
-      .sort((a, b) => (b.amount || 0) - (a.amount || 0))
-      .slice(0, 5);
-    
-    section += `\nTop Cost Items:\n`;
-    topItems.forEach((item, index) => {
-      const variance = item.variance || 0;
-      const varianceText = variance !== 0 ? ` (${variance > 0 ? '+' : ''}$${variance.toLocaleString()} variance)` : '';
-      section += `${index + 1}. ${item.costCode}: $${(item.amount || 0).toLocaleString()}${varianceText}\n`;
-    });
-    
-    return section;
-  }
-
-  // Build comparison data section
-  buildComparisonDataSection(entities) {
-    let section = `\nCOMPARISON DATA:\n`;
-    
-    // Group by category for comparison
-    const byCategory = {};
-    entities.forEach(entity => {
-      const category = entity.category || 'other';
-      if (!byCategory[category]) byCategory[category] = [];
-      byCategory[category].push(entity);
-    });
-    
-    Object.entries(byCategory).forEach(([category, items]) => {
-      const total = items.reduce((sum, item) => sum + (item.amount || 0), 0);
-      section += `\n${category.toUpperCase()} (${items.length} items - $${total.toLocaleString()}):\n`;
-      
-      items.slice(0, 3).forEach(item => {
-        section += `  - ${item.costCode}: $${(item.amount || 0).toLocaleString()}\n`;
-      });
-    });
-    
-    return section;
-  }
-
-  // Build general data section
-  buildGeneralDataSection(entities) {
-    let section = `\nRELEVANT CONSTRUCTION DATA:\n`;
-    
-    entities.slice(0, 8).forEach((entity, index) => {
-      section += `\n${index + 1}. ${entity.costCode} - ${entity.category}\n`;
-      section += `   Amount: $${(entity.amount || 0).toLocaleString()}`;
-      if (entity.budgetedAmount) {
-        section += ` (Budgeted: $${entity.budgetedAmount.toLocaleString()})`;
-      }
-      section += `\n   Similarity: ${entity.similarity}%\n`;
-      if (entity.contentExcerpt) {
-        section += `   Details: ${entity.contentExcerpt}\n`;
-      }
-    });
-    
-    return section;
-  }
-
-  // Calculate relevance score
-  calculateRelevanceScore(result, queryEmbedding) {
-    let score = parseFloat(result.similarity) || 0;
-    
-    // Boost for higher cost items (more significant)
-    const amount = result.total_amount || 0;
-    if (amount > 10000) score += 0.05;
-    if (amount > 50000) score += 0.05;
-    
-    // Boost for items with relationships
-    if (result.relationshipCount > 0) {
-      score += Math.min(0.1, result.relationshipCount * 0.02);
-    }
-    
-    return Math.min(score, 1.0);
-  }
-
-  // Calculate context score
-  calculateContextScore(result) {
-    let score = 0.5; // Base score
-    
-    // Boost for complete data
-    if (result.cost_code) score += 0.1;
-    if (result.category && result.category !== 'other') score += 0.1;
-    if (result.description) score += 0.1;
-    if (result.total_amount > 0) score += 0.1;
-    
-    // Boost for variance data (estimate items)
-    if (result.budgeted_amount > 0) score += 0.1;
-    
-    return Math.min(score, 1.0);
-  }
-
-  // Classify query type
-  classifyQuery(question) {
-    const q = question.toLowerCase();
-    
-    if (q.includes('cost') || q.includes('budget') || q.includes('spend') || q.includes('$')) {
-      return 'cost_analysis';
-    }
-    if (q.includes('compare') || q.includes('vs') || q.includes('difference')) {
-      return 'comparison';
-    }
-    if (q.includes('schedule') || q.includes('time') || q.includes('date')) {
-      return 'schedule';
-    }
-    if (q.includes('material') || q.includes('labor') || q.includes('subcontractor')) {
-      return 'category';
-    }
-    
-    return 'general';
-  }
-
-  // Extract key terms from question
-  extractKeyTerms(question) {
-    const terms = question.toLowerCase()
-      .replace(/[^\w\s]/g, ' ')
-      .split(' ')
-      .filter(term => term.length > 3 && !['what', 'when', 'where', 'which', 'this', 'that', 'with', 'from'].includes(term));
-    
-    return [...new Set(terms)].slice(0, 10);
-  }
-
-  // Analyze categories
-  analyzeCategoriesByCount(entities) {
-    const categories = {};
-    entities.forEach(entity => {
-      const category = entity.category || 'other';
-      categories[category] = (categories[category] || 0) + 1;
-    });
-    return categories;
-  }
-
-  // Analyze cost codes
-  analyzeCostCodes(entities) {
-    const costCodes = {};
-    entities.forEach(entity => {
-      if (entity.cost_code) {
-        costCodes[entity.cost_code] = (costCodes[entity.cost_code] || 0) + 1;
-      }
-    });
-    return costCodes;
-  }
-
-  // Calculate financial summary
-  calculateFinancialSummary(entities) {
-    const summary = {
-      totalAmount: 0,
-      totalBudgeted: 0,
-      totalVariance: 0,
-      itemCount: entities.length
-    };
-    
-    entities.forEach(entity => {
-      summary.totalAmount += entity.total_amount || 0;
-      summary.totalBudgeted += entity.budgeted_amount || 0;
-    });
-    
-    summary.totalVariance = summary.totalAmount - summary.totalBudgeted;
-    
-    return summary;
-  }
-
-  // Analyze relationships
-  analyzeRelationships(entities) {
-    const analysis = {
-      totalRelationships: 0,
-      commonTypes: [],
-      strongConnections: 0
-    };
-    
-    const typeCount = {};
-    
-    entities.forEach(entity => {
-      if (entity.relationships) {
-        analysis.totalRelationships += entity.relationships.length;
-        
-        entity.relationships.forEach(rel => {
-          typeCount[rel.type] = (typeCount[rel.type] || 0) + 1;
-          if (rel.strength > 0.8) {
-            analysis.strongConnections++;
-          }
-        });
-      }
-    });
-    
-    analysis.commonTypes = Object.entries(typeCount)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([type]) => type);
-    
-    return analysis;
-  }
-
-  // Create successful response
-  createResponse(question, answer, context, similarEntities, options) {
+  /**
+   * Create comprehensive response object
+   */
+  createEstimateResponse(question, answer, context, similarEntities, queryType, options) {
     return {
       success: true,
       question,
       answer,
+      queryType,
+      
       metadata: {
         totalResults: similarEntities.length,
-        queryType: context.queryType,
-        avgSimilarity: similarEntities.reduce((sum, e) => sum + e.similarity, 0) / similarEntities.length,
-        categories: Object.keys(context.categories),
-        costCodes: Object.keys(context.costCodes).slice(0, 10),
+        avgSimilarity: similarEntities.length > 0 
+          ? Math.round(similarEntities.reduce((sum, e) => sum + e.similarity, 0) / similarEntities.length * 100)
+          : 0,
         financialSummary: context.financialSummary,
-        relationshipInsights: context.relationships,
-        searchOptions: options
+        budgetPerformance: context.budgetPerformance,
+        queryInsights: context.queryInsights,
+        searchOptions: options,
+        processingTime: null // Will be filled by calling function
       },
-      sources: similarEntities.map(entity => ({
-        id: entity.id,
+      
+      sources: similarEntities.slice(0, 6).map(entity => ({
         costCode: entity.cost_code,
         description: entity.description,
         category: entity.category,
         amount: entity.total_amount,
-        similarity: Math.round(entity.similarity * 100),
-        relevance: Math.round((entity.relevanceScore || 0) * 100)
+        budgeted: entity.budgeted_amount,
+        variance: entity.budgetHealth?.variance || 0,
+        similarity: entity.similarityPercent,
+        relevance: Math.round(entity.estimateRelevance * 100)
       })),
+      
+      insights: {
+        highValueItems: context.highValueItems,
+        varianceItems: context.varianceItems,
+        categoryBreakdown: context.categoryAnalysis,
+        recommendations: this.generateRecommendations(context, queryType)
+      },
+      
       timestamp: new Date().toISOString()
     };
   }
 
-  // Create empty response
-  createEmptyResponse(question) {
+  /**
+   * Generate actionable recommendations based on context
+   */
+  generateRecommendations(context, queryType) {
+    const recommendations = [];
+    const { budgetPerformance, financialSummary, varianceItems } = context;
+    
+    // Budget performance recommendations
+    if (budgetPerformance.significantVariance > 0) {
+      recommendations.push({
+        type: 'budget_control',
+        priority: 'high',
+        message: `${budgetPerformance.significantVariance} items have significant budget variances. Review cost control processes.`
+      });
+    }
+    
+    // Overall variance recommendations
+    if (Math.abs(financialSummary.totalVariancePercent) > 10) {
+      recommendations.push({
+        type: 'budget_review',
+        priority: 'medium',
+        message: `Overall project variance is ${financialSummary.totalVariancePercent.toFixed(1)}%. Consider budget revision.`
+      });
+    }
+    
+    // High variance item recommendations
+    if (varianceItems.length > 0) {
+      const worstVariance = varianceItems[0];
+      recommendations.push({
+        type: 'cost_investigation',
+        priority: 'high',
+        message: `Investigate ${worstVariance.costCode} with ${worstVariance.variancePercent.toFixed(1)}% variance.`
+      });
+    }
+    
+    // Query-specific recommendations
+    switch (queryType) {
+      case 'material_analysis':
+        if (context.categoryAnalysis.material) {
+          const materialData = context.categoryAnalysis.material;
+          if (Math.abs(materialData.variancePercent) > 15) {
+            recommendations.push({
+              type: 'procurement',
+              priority: 'medium',
+              message: 'Material costs show significant variance. Review supplier contracts and pricing.'
+            });
+          }
+        }
+        break;
+        
+      case 'labor_analysis':
+        if (context.categoryAnalysis.labor) {
+          const laborData = context.categoryAnalysis.labor;
+          if (laborData.averageAmount > 0) {
+            recommendations.push({
+              type: 'productivity',
+              priority: 'medium',
+              message: 'Monitor labor productivity and consider crew efficiency improvements.'
+            });
+          }
+        }
+        break;
+    }
+    
+    return recommendations;
+  }
+
+  /**
+   * Create empty response for no results
+   */
+  createEmptyEstimateResponse(question, queryType) {
     return {
       success: true,
       question,
-      answer: "I couldn't find any relevant construction data for your question. Try rephrasing your query or asking about specific cost codes, categories, or project elements.",
+      answer: "I couldn't find any relevant estimate data for your question. This could mean the query terms don't match available cost codes, descriptions, or categories. Try rephrasing with specific cost codes, work categories (material, labor, subcontractor), or area names.",
+      queryType,
       metadata: {
         totalResults: 0,
-        queryType: this.classifyQuery(question),
-        categories: [],
-        costCodes: []
+        avgSimilarity: 0,
+        suggestion: "Try searching with specific cost codes, categories like 'material' or 'labor', or work areas."
       },
       sources: [],
+      insights: null,
       timestamp: new Date().toISOString()
     };
   }
 
-  // Create error response
+  /**
+   * Create error response
+   */
   createErrorResponse(question, error) {
     return {
       success: false,
       question,
-      answer: "I encountered an error while processing your question. Please try again or rephrase your query.",
+      answer: "I encountered an error while processing your estimate query. Please try rephrasing your question or contact support if the issue persists.",
       error: error.message,
       timestamp: new Date().toISOString()
     };
   }
 
-  // Test RAG service
-  async testRAGService() {
+  /**
+   * Test the RAG service
+   */
+  async testEstimateRAG() {
     try {
-      console.log('🧪 Testing RAG service...');
+      console.log('🧪 Testing Estimate RAG service...');
       
-      const testQuestion = 'What electrical work was done on the project?';
+      const testQuestion = 'What electrical work was estimated and how does it compare to budget?';
       const testEmbedding = await this.generateQueryEmbedding(testQuestion);
       
       const isValid = Array.isArray(testEmbedding) && 
@@ -572,19 +995,19 @@ RESPONSE:`;
                      typeof testEmbedding[0] === 'number';
       
       if (isValid) {
-        console.log(`✅ RAG service test passed`);
-        return true;
+        console.log(`✅ Estimate RAG test passed (embedding dimension: ${testEmbedding.length})`);
+        return { success: true, dimension: testEmbedding.length };
       } else {
         throw new Error('Invalid embedding generated');
       }
       
     } catch (error) {
-      console.error('❌ RAG service test failed:', error.message);
-      return false;
+      console.error('❌ Estimate RAG test failed:', error.message);
+      return { success: false, error: error.message };
     }
   }
 }
 
 // Export singleton instance
-const ragService = new RAGService();
-export default ragService;
+const estimateRAGService = new EstimateRAGService();
+export default estimateRAGService;

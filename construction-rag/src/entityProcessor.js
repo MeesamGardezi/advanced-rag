@@ -1,83 +1,107 @@
 /**
- * Entity Processor
- * Converts EstimateRow and ConsumedRow data into rich graph entities
- * Zero hardcoding - all driven by smart detection and templates
+ * Estimate Entity Processor
+ * Converts EstimateRow data into optimized entities for RAG
+ * ESTIMATES ONLY - Removed consumed data processing for performance
  */
 
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-class EntityProcessor {
+class EstimateEntityProcessor {
   constructor() {
-    // Category detection patterns (smart, not hardcoded!)
+    // Enhanced category detection patterns for better accuracy
     this.categoryPatterns = {
       material: {
-        costCodePatterns: [/\d+M$/i, /MATERIAL/i, /SUPPLY/i, /EQUIPMENT/i],
-        descriptionPatterns: [/material/i, /supply/i, /equipment/i, /lumber/i, /concrete/i, /steel/i, /pipe/i, /wire/i, /fixture/i]
+        costCodePatterns: [/\d+M$/i, /MATERIAL/i, /SUPPLY/i, /EQUIPMENT/i, /MAT$/i],
+        descriptionPatterns: [/material/i, /supply/i, /equipment/i, /lumber/i, /concrete/i, /steel/i, /pipe/i, /wire/i, /fixture/i, /hardware/i, /fastener/i, /insulation/i, /drywall/i, /flooring/i, /roofing/i, /paint/i, /door/i, /window/i, /cabinet/i]
       },
       labor: {
-        costCodePatterns: [/\d+L$/i, /LABOR/i, /WORK/i],
-        descriptionPatterns: [/labor/i, /work/i, /install/i, /crew/i, /worker/i, /hour/i, /hr/i, /manhour/i]
+        costCodePatterns: [/\d+L$/i, /LABOR/i, /WORK/i, /LAB$/i],
+        descriptionPatterns: [/labor/i, /work/i, /install/i, /crew/i, /worker/i, /hour/i, /hr/i, /manhour/i, /foreman/i, /carpenter/i, /electrician/i, /plumber/i, /demo/i, /demolition/i, /framing/i, /finish/i]
       },
       subcontractor: {
-        costCodePatterns: [/\d+S$/i, /SUBCONTRACTOR/i, /SUB/i, /CONTRACTOR/i],
-        descriptionPatterns: [/subcontractor/i, /sub /i, /contractor/i, /specialty/i, /trade/i]
+        costCodePatterns: [/\d+S$/i, /SUBCONTRACTOR/i, /SUB/i, /CONTRACTOR/i, /SPEC/i],
+        descriptionPatterns: [/subcontractor/i, /sub /i, /contractor/i, /specialty/i, /trade/i, /hvac/i, /electrical/i, /plumbing/i, /mechanical/i, /consultant/i, /engineer/i]
       },
       overhead: {
-        costCodePatterns: [/\d+O$/i, /OVERHEAD/i, /MANAGEMENT/i, /ADMIN/i],
-        descriptionPatterns: [/overhead/i, /management/i, /admin/i, /supervision/i, /permit/i, /fee/i, /insurance/i]
+        costCodePatterns: [/\d+O$/i, /OVERHEAD/i, /MANAGEMENT/i, /ADMIN/i, /OH$/i],
+        descriptionPatterns: [/overhead/i, /management/i, /admin/i, /supervision/i, /permit/i, /fee/i, /insurance/i, /bond/i, /temp/i, /temporary/i, /cleanup/i, /safety/i, /office/i]
+      },
+      equipment: {
+        costCodePatterns: [/\d+E$/i, /EQUIPMENT/i, /RENTAL/i, /TOOL/i],
+        descriptionPatterns: [/rental/i, /equipment/i, /tool/i, /crane/i, /excavator/i, /bulldozer/i, /truck/i, /scaffold/i, /generator/i, /compressor/i]
       }
     };
   }
 
-  // Smart category detection from cost codes and descriptions
+  /**
+   * Smart category detection from cost codes and descriptions
+   */
   detectCategory(costCode, description) {
     const checkText = `${costCode || ''} ${description || ''}`.toLowerCase();
     
+    // Check cost code patterns first (more reliable)
     for (const [category, patterns] of Object.entries(this.categoryPatterns)) {
-      // Check cost code patterns first (more reliable)
       const costCodeMatch = patterns.costCodePatterns.some(pattern => 
         pattern.test(costCode || '')
       );
       
       if (costCodeMatch) return category;
-      
-      // Check description patterns
-      const descriptionMatch = patterns.descriptionPatterns.some(pattern => 
-        pattern.test(checkText)
-      );
-      
-      if (descriptionMatch) return category;
     }
     
-    return 'other'; // Default fallback
+    // Check description patterns with scoring
+    const categoryScores = {};
+    for (const [category, patterns] of Object.entries(this.categoryPatterns)) {
+      categoryScores[category] = 0;
+      
+      patterns.descriptionPatterns.forEach(pattern => {
+        const matches = (checkText.match(pattern) || []).length;
+        categoryScores[category] += matches;
+      });
+    }
+    
+    // Return category with highest score
+    const bestCategory = Object.entries(categoryScores)
+      .reduce((a, b) => categoryScores[a[0]] > categoryScores[b[0]] ? a : b);
+    
+    return bestCategory[1] > 0 ? bestCategory[0] : 'other';
   }
 
-  // Process single EstimateRow into rich entity
-  processEstimateRow(estimateRow, projectId, jobMetadata = {}) {
+  /**
+   * Process single EstimateRow into optimized entity for RAG
+   */
+  processEstimateRow(estimateRow, jobData) {
     try {
-      // Extract and normalize fields
-      const costCode = estimateRow.costCode || 'UNKNOWN';
-      const description = estimateRow.description || '';
-      const taskScope = estimateRow.taskScope || '';
-      const area = estimateRow.area || '';
-      const qty = parseFloat(estimateRow.qty) || 0;
-      const rate = parseFloat(estimateRow.rate) || 0;
-      const total = parseFloat(estimateRow.total) || 0;
-      const budgeted = parseFloat(estimateRow.budgetedTotal) || 0;
-      const variance = total - budgeted;
-      const variancePercent = budgeted > 0 ? ((variance / budgeted) * 100) : 0;
-      const units = estimateRow.units || 'ea';
+      // Extract and validate fields
+      const costCode = (estimateRow.costCode || '').toString().trim();
+      const description = (estimateRow.description || '').toString().trim();
+      const taskScope = (estimateRow.taskScope || '').toString().trim();
+      const area = (estimateRow.area || '').toString().trim();
+      
+      // Parse numeric values safely
+      const qty = this.parseNumber(estimateRow.qty);
+      const rate = this.parseNumber(estimateRow.rate);
+      const total = this.parseNumber(estimateRow.total);
+      const budgetedRate = this.parseNumber(estimateRow.budgetedRate);
+      const budgetedTotal = this.parseNumber(estimateRow.budgetedTotal);
+      
+      const units = (estimateRow.units || 'ea').toString().trim();
+      const notes = (estimateRow.notesRemarks || '').toString().trim();
+      const rowType = (estimateRow.rowType || 'estimate').toString().trim();
+      
+      // Handle materials array
       const materials = Array.isArray(estimateRow.materials) ? estimateRow.materials : [];
-      const notes = estimateRow.notesRemarks || '';
-      const rowType = estimateRow.rowType || 'estimate';
-
+      
+      // Calculate variance
+      const variance = total - budgetedTotal;
+      const variancePercent = budgetedTotal > 0 ? ((variance / budgetedTotal) * 100) : 0;
+      
       // Smart category detection
       const category = this.detectCategory(costCode, description);
-
-      // Generate rich content for embedding
-      const content = this.generateEstimateContent({
+      
+      // Generate optimized content for embeddings
+      const content = this.generateOptimizedEstimateContent({
         costCode,
         description,
         taskScope,
@@ -85,7 +109,8 @@ class EntityProcessor {
         qty,
         rate,
         total,
-        budgeted,
+        budgetedRate,
+        budgetedTotal,
         variance,
         variancePercent,
         units,
@@ -93,335 +118,347 @@ class EntityProcessor {
         notes,
         rowType,
         category,
-        jobTitle: jobMetadata.jobTitle || 'Unknown Project',
-        clientName: jobMetadata.clientName || 'Unknown Client'
+        jobData
       });
 
       return {
-        projectId,
+        projectId: jobData.jobId || jobData.documentId,
         entityType: 'estimate_row',
         costCode,
-        description: `${costCode} - ${description}`.trim(),
+        description: this.createDisplayDescription(costCode, description),
         taskScope,
         category,
         totalAmount: total,
-        budgetedAmount: budgeted,
+        budgetedAmount: budgetedTotal,
         rawData: estimateRow,
         content: content,
-        // Additional fields for relationships
+        
+        // Additional searchable fields
         area,
+        units,
+        qty,
+        rate,
+        budgetedRate,
         variance,
         variancePercent,
         rowType,
-        units,
-        qty,
-        rate
+        materials: materials.length > 0 ? materials : null,
+        notes: notes || null
       };
 
     } catch (error) {
-      console.error('❌ Error processing estimate row:', error.message);
-      console.error('Raw data:', estimateRow);
-      throw error;
+      console.error('Error processing estimate row:', error.message);
+      console.error('Raw estimate data:', JSON.stringify(estimateRow, null, 2));
+      throw new Error(`Failed to process estimate row: ${error.message}`);
     }
   }
 
-  // Process single ConsumedRow into rich entity  
-  processConsumedRow(consumedRow, projectId, jobMetadata = {}) {
-    try {
-      // Extract and normalize fields
-      const costCode = consumedRow.costCode || 'UNKNOWN';
-      const job = consumedRow.job || '';
-      const amount = parseFloat(consumedRow.amount) || 0;
-      const date = consumedRow.date || '';
-
-      // Smart category detection
-      const category = this.detectCategory(costCode, job);
-
-      // Generate rich content for embedding
-      const content = this.generateConsumedContent({
-        costCode,
-        job,
-        amount,
-        date,
-        category,
-        jobTitle: jobMetadata.jobTitle || 'Unknown Project',
-        clientName: jobMetadata.clientName || 'Unknown Client'
-      });
-
-      return {
-        projectId,
-        entityType: 'consumed_row',
-        costCode,
-        description: `${costCode} - ${job}`.trim(),
-        taskScope: null, // Consumed data doesn't have task scope
-        category,
-        totalAmount: amount,
-        budgetedAmount: null, // Consumed data doesn't have budgeted amount
-        rawData: consumedRow,
-        content: content,
-        // Additional fields
-        date
-      };
-
-    } catch (error) {
-      console.error('❌ Error processing consumed row:', error.message);
-      console.error('Raw data:', consumedRow);
-      throw error;
+  /**
+   * Parse number values safely
+   */
+  parseNumber(value) {
+    if (typeof value === 'number') return isNaN(value) ? 0 : value;
+    if (typeof value === 'string') {
+      const parsed = parseFloat(value.replace(/[^\d.-]/g, ''));
+      return isNaN(parsed) ? 0 : parsed;
     }
+    return 0;
   }
 
-  // Generate rich content for EstimateRow embedding
-  generateEstimateContent(data) {
+  /**
+   * Create display description combining cost code and description
+   */
+  createDisplayDescription(costCode, description) {
+    if (!costCode && !description) return 'Unspecified Item';
+    if (!costCode) return description;
+    if (!description) return costCode;
+    return `${costCode} - ${description}`;
+  }
+
+  /**
+   * Generate optimized content for embeddings - focused on estimate data
+   */
+  generateOptimizedEstimateContent(data) {
     const {
-      costCode, description, taskScope, area, qty, rate, total, budgeted, 
-      variance, variancePercent, units, materials, notes, rowType, category,
-      jobTitle, clientName
+      costCode, description, taskScope, area, qty, rate, total, budgetedRate, 
+      budgetedTotal, variance, variancePercent, units, materials, notes, 
+      rowType, category, jobData
     } = data;
 
-    // Create materials text
+    // Build materials text
     const materialsText = materials.length > 0 
-      ? materials.map(m => typeof m === 'object' ? m.name || m.description : m).join(', ')
-      : 'No materials specified';
+      ? `Materials: ${materials.map(m => typeof m === 'object' ? (m.name || m.description || 'Unknown') : m).join(', ')}`
+      : '';
 
-    // Variance analysis text
-    const varianceText = variance > 0 
-      ? `$${Math.abs(variance).toFixed(2)} over budget (${variancePercent.toFixed(1)}%)`
-      : variance < 0 
-        ? `$${Math.abs(variance).toFixed(2)} under budget (${Math.abs(variancePercent).toFixed(1)}%)`
-        : 'On budget';
+    // Build variance analysis
+    let varianceAnalysis = '';
+    if (budgetedTotal > 0) {
+      if (Math.abs(variancePercent) < 5) {
+        varianceAnalysis = `On budget (${variancePercent.toFixed(1)}% variance)`;
+      } else if (variance > 0) {
+        varianceAnalysis = `Over budget by $${Math.abs(variance).toFixed(2)} (${variancePercent.toFixed(1)}% over)`;
+      } else {
+        varianceAnalysis = `Under budget by $${Math.abs(variance).toFixed(2)} (${Math.abs(variancePercent).toFixed(1)}% under)`;
+      }
+    }
+
+    // Build work scope context
+    const scopeContext = taskScope || area ? 
+      `Work Area: ${area || 'General'} | Scope: ${taskScope || 'General work'}` : 
+      'General construction work';
 
     // Category-specific insights
-    let categoryInsight = '';
-    switch (category) {
-      case 'material':
-        categoryInsight = `Material cost item requiring ${qty} ${units} at $${rate} per unit.`;
-        break;
-      case 'labor':
-        categoryInsight = `Labor cost for ${qty} ${units} of work at $${rate} per unit.`;
-        break;
-      case 'subcontractor':
-        categoryInsight = `Subcontractor work estimated at $${total}.`;
-        break;
-      default:
-        categoryInsight = `${category} category item with ${qty} ${units}.`;
-    }
-
-    return `
-Construction Estimate Item for ${jobTitle} (Client: ${clientName})
-
-Cost Code: ${costCode}
-Description: ${description}
-Category: ${category.toUpperCase()}
-${categoryInsight}
-
-Project Details:
-- Task Scope: ${taskScope}
-- Work Area: ${area}
-- Type: ${rowType}
-
-Financial Summary:
-- Quantity: ${qty} ${units}
-- Rate: $${rate.toFixed(2)} per ${units}
-- Total Estimated Cost: $${total.toFixed(2)}
-- Budgeted Amount: $${budgeted.toFixed(2)}
-- Budget Variance: ${varianceText}
-
-Materials & Resources:
-${materialsText}
-
-Additional Notes:
-${notes || 'No additional notes'}
-
-This ${category} item ${variance > 0 ? 'is over budget' : variance < 0 ? 'is under budget' : 'is on budget'} and ${taskScope ? `belongs to the ${taskScope} scope` : 'has no defined scope'}.
-    `.trim();
-  }
-
-  // Generate rich content for ConsumedRow embedding
-  generateConsumedContent(data) {
-    const { costCode, job, amount, date, category, jobTitle, clientName } = data;
-
-    // Category-specific insights
-    let categoryInsight = '';
-    switch (category) {
-      case 'material':
-        categoryInsight = `Material expense totaling $${amount.toFixed(2)}.`;
-        break;
-      case 'labor':
-        categoryInsight = `Labor cost of $${amount.toFixed(2)} was incurred.`;
-        break;
-      case 'subcontractor':
-        categoryInsight = `Payment to subcontractor for $${amount.toFixed(2)}.`;
-        break;
-      default:
-        categoryInsight = `${category} expense of $${amount.toFixed(2)}.`;
-    }
-
-    return `
-Actual Construction Cost for ${jobTitle} (Client: ${clientName})
-
-Cost Code: ${costCode}
-Job/Description: ${job}
-Category: ${category.toUpperCase()}
-${categoryInsight}
-
-Financial Details:
-- Amount Spent: $${amount.toFixed(2)}
-- Date: ${date || 'Date not specified'}
-
-This represents actual money spent on ${category} work under cost code ${costCode}. The expense was ${amount > 1000 ? 'significant' : 'minor'} and relates to ${job || 'general project work'}.
-    `.trim();
-  }
-
-  // Process batch of estimates from Firebase job data
-  processJobEstimates(jobData) {
-    if (!jobData || !jobData.estimates || jobData.estimates.length === 0) {
-      console.log(`⚠️  No estimates found for job ${jobData.jobId}`);
-      return [];
-    }
-
-    const entities = [];
-    const metadata = {
-      jobTitle: jobData.jobTitle,
-      clientName: jobData.clientName
+    const categoryInsights = {
+      material: `Material procurement item requiring ${qty} ${units}. Unit cost: $${rate.toFixed(2)} per ${units}.`,
+      labor: `Labor work estimated for ${qty} ${units} at $${rate.toFixed(2)} per ${units}.`,
+      subcontractor: `Subcontractor work valued at $${total.toFixed(2)}. ${qty > 0 ? `Quantity: ${qty} ${units}` : ''}`,
+      equipment: `Equipment rental/purchase for ${qty} ${units} at $${rate.toFixed(2)} per ${units}.`,
+      overhead: `Project overhead cost of $${total.toFixed(2)}.`,
+      other: `Construction item for ${qty} ${units}.`
     };
 
-    console.log(`🔄 Processing ${jobData.estimates.length} estimates for ${jobData.jobTitle}...`);
+    return `
+CONSTRUCTION ESTIMATE: ${jobData.projectTitle || 'Unknown Project'}
+Client: ${jobData.clientName || 'Unknown Client'}
+Location: ${jobData.siteCity ? `${jobData.siteCity}, ${jobData.siteState || ''}` : 'Unknown Location'}
 
-    for (const estimate of jobData.estimates) {
-      try {
-        const entity = this.processEstimateRow(estimate, jobData.jobId, metadata);
-        entities.push(entity);
-      } catch (error) {
-        console.error(`❌ Failed to process estimate row:`, error.message);
-        // Continue processing other rows
-      }
-    }
+COST CODE: ${costCode}
+DESCRIPTION: ${description}
+CATEGORY: ${category.toUpperCase()}
+TYPE: ${rowType}
 
-    console.log(`✅ Processed ${entities.length}/${jobData.estimates.length} estimate entities`);
-    return entities;
+${scopeContext}
+
+COST BREAKDOWN:
+- Quantity: ${qty} ${units}
+- Unit Rate: $${rate.toFixed(2)} per ${units}
+- Total Cost: $${total.toFixed(2)}
+- Budgeted Rate: $${budgetedRate.toFixed(2)} per ${units}
+- Budgeted Total: $${budgetedTotal.toFixed(2)}
+- Budget Status: ${varianceAnalysis}
+
+WORK DETAILS:
+${categoryInsights[category] || categoryInsights.other}
+${materialsText}
+${notes ? `Additional Notes: ${notes}` : ''}
+
+COST ANALYSIS:
+This ${category} item ${variance > 0 ? 'exceeds' : variance < 0 ? 'is under' : 'meets'} the budgeted amount${budgetedTotal > 0 ? ` by $${Math.abs(variance).toFixed(2)}` : ''}. 
+${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit economics: $${rate.toFixed(2)}/${units}` : ''}
+    `.trim();
   }
 
-  // Process batch of consumed data from Firebase
-  processJobConsumed(consumedData, jobMetadata = {}) {
-    if (!consumedData || !consumedData.entries || consumedData.entries.length === 0) {
-      console.log(`⚠️  No consumed data found for job ${consumedData.jobId}`);
+  /**
+   * Process complete job estimates from Firebase
+   */
+  processJobEstimates(jobData) {
+    if (!jobData) {
+      console.log('No job data provided');
       return [];
     }
 
-    const entities = [];
-    console.log(`🔄 Processing ${consumedData.entries.length} consumed entries...`);
+    if (!jobData.estimate || !Array.isArray(jobData.estimate) || jobData.estimate.length === 0) {
+      console.log(`No estimates found for job ${jobData.jobId || jobData.documentId}`);
+      return [];
+    }
 
-    for (const consumed of consumedData.entries) {
+    console.log(`Processing ${jobData.estimate.length} estimates for ${jobData.projectTitle || 'Unknown Project'}...`);
+
+    const entities = [];
+    let processedCount = 0;
+    let errorCount = 0;
+
+    for (let i = 0; i < jobData.estimate.length; i++) {
       try {
-        const entity = this.processConsumedRow(consumed, consumedData.jobId, jobMetadata);
+        const estimateRow = jobData.estimate[i];
+        
+        // Skip empty or invalid rows
+        if (!this.isValidEstimateRow(estimateRow)) {
+          console.log(`Skipping invalid estimate row at index ${i}`);
+          continue;
+        }
+
+        const entity = this.processEstimateRow(estimateRow, jobData);
         entities.push(entity);
+        processedCount++;
+
       } catch (error) {
-        console.error(`❌ Failed to process consumed row:`, error.message);
+        console.error(`Failed to process estimate row ${i}:`, error.message);
+        errorCount++;
         // Continue processing other rows
       }
     }
 
-    console.log(`✅ Processed ${entities.length}/${consumedData.entries.length} consumed entities`);
+    console.log(`Processed ${processedCount}/${jobData.estimate.length} estimates (${errorCount} errors)`);
     return entities;
   }
 
-  // Process complete job data (estimates + consumed)
-  processCompleteJobData(completeJobData) {
-    const allEntities = [];
-
-    // Process estimates
-    const estimateEntities = this.processJobEstimates(completeJobData);
-    allEntities.push(...estimateEntities);
-
-    // Process consumed data if available
-    if (completeJobData.consumedData) {
-      const consumedEntities = this.processJobConsumed(
-        completeJobData.consumedData,
-        {
-          jobTitle: completeJobData.jobTitle,
-          clientName: completeJobData.clientName
-        }
-      );
-      allEntities.push(...consumedEntities);
-    }
-
-    console.log(`✅ Total entities processed for ${completeJobData.jobTitle}: ${allEntities.length}`);
+  /**
+   * Validate estimate row has minimum required data
+   */
+  isValidEstimateRow(estimateRow) {
+    if (!estimateRow || typeof estimateRow !== 'object') return false;
     
-    return allEntities;
+    // Must have at least a cost code or description
+    const hasCostCode = estimateRow.costCode && estimateRow.costCode.toString().trim().length > 0;
+    const hasDescription = estimateRow.description && estimateRow.description.toString().trim().length > 0;
+    
+    return hasCostCode || hasDescription;
   }
 
-  // Analyze entities and provide insights
-  analyzeEntities(entities) {
+  /**
+   * Analyze processed entities for insights
+   */
+  analyzeEstimates(entities) {
+    if (!entities || entities.length === 0) {
+      return {
+        totalEntities: 0,
+        categories: {},
+        costCodes: {},
+        totals: { estimated: 0, budgeted: 0, variance: 0 }
+      };
+    }
+
     const analysis = {
       totalEntities: entities.length,
-      estimateCount: entities.filter(e => e.entityType === 'estimate_row').length,
-      consumedCount: entities.filter(e => e.entityType === 'consumed_row').length,
       categories: {},
       costCodes: {},
-      totalEstimated: 0,
-      totalConsumed: 0,
-      totalBudgeted: 0,
-      highVarianceItems: []
+      areas: {},
+      totals: {
+        estimated: 0,
+        budgeted: 0,
+        variance: 0
+      },
+      budgetHealth: {
+        onBudget: 0,
+        overBudget: 0,
+        underBudget: 0
+      },
+      highValueItems: [],
+      varianceItems: []
     };
 
     entities.forEach(entity => {
-      // Category breakdown
+      // Category analysis
       analysis.categories[entity.category] = (analysis.categories[entity.category] || 0) + 1;
       
-      // Cost code breakdown
-      analysis.costCodes[entity.costCode] = (analysis.costCodes[entity.costCode] || 0) + 1;
+      // Cost code analysis
+      if (entity.costCode) {
+        analysis.costCodes[entity.costCode] = (analysis.costCodes[entity.costCode] || 0) + 1;
+      }
+      
+      // Area analysis
+      if (entity.area) {
+        analysis.areas[entity.area] = (analysis.areas[entity.area] || 0) + 1;
+      }
       
       // Financial totals
-      if (entity.entityType === 'estimate_row') {
-        analysis.totalEstimated += entity.totalAmount || 0;
-        analysis.totalBudgeted += entity.budgetedAmount || 0;
-        
-        // High variance detection
-        if (entity.variancePercent && Math.abs(entity.variancePercent) > 20) {
-          analysis.highVarianceItems.push({
+      analysis.totals.estimated += entity.totalAmount || 0;
+      analysis.totals.budgeted += entity.budgetedAmount || 0;
+      
+      // Budget health
+      const variance = (entity.totalAmount || 0) - (entity.budgetedAmount || 0);
+      if (Math.abs(variance) < 100) {
+        analysis.budgetHealth.onBudget++;
+      } else if (variance > 0) {
+        analysis.budgetHealth.overBudget++;
+      } else {
+        analysis.budgetHealth.underBudget++;
+      }
+      
+      // High value items (>$5000)
+      if ((entity.totalAmount || 0) > 5000) {
+        analysis.highValueItems.push({
+          costCode: entity.costCode,
+          description: entity.description,
+          amount: entity.totalAmount,
+          category: entity.category
+        });
+      }
+      
+      // High variance items (>20% or >$1000)
+      if (entity.budgetedAmount > 0) {
+        const variancePercent = Math.abs(variance / entity.budgetedAmount) * 100;
+        if (variancePercent > 20 || Math.abs(variance) > 1000) {
+          analysis.varianceItems.push({
             costCode: entity.costCode,
-            variance: entity.variancePercent,
-            amount: entity.totalAmount
+            description: entity.description,
+            variance: variance,
+            variancePercent: variancePercent,
+            estimated: entity.totalAmount,
+            budgeted: entity.budgetedAmount
           });
         }
-      } else if (entity.entityType === 'consumed_row') {
-        analysis.totalConsumed += entity.totalAmount || 0;
       }
     });
 
-    // Overall budget variance
-    analysis.totalVariance = analysis.totalEstimated - analysis.totalBudgeted;
-    analysis.totalVariancePercent = analysis.totalBudgeted > 0 
-      ? (analysis.totalVariance / analysis.totalBudgeted) * 100 
+    // Calculate total variance
+    analysis.totals.variance = analysis.totals.estimated - analysis.totals.budgeted;
+    analysis.totals.variancePercent = analysis.totals.budgeted > 0 
+      ? (analysis.totals.variance / analysis.totals.budgeted) * 100 
       : 0;
+
+    // Sort arrays by value
+    analysis.highValueItems.sort((a, b) => (b.amount || 0) - (a.amount || 0));
+    analysis.varianceItems.sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance));
 
     return analysis;
   }
 
-  // Validate entity data before processing
-  validateEstimateRow(estimateRow) {
-    const required = ['costCode'];
-    const missing = required.filter(field => !estimateRow[field]);
+  /**
+   * Validate entity data before processing
+   */
+  validateEstimateEntity(entity) {
+    const required = ['costCode', 'totalAmount'];
+    const missing = required.filter(field => {
+      const value = entity[field];
+      return value === undefined || value === null || 
+             (typeof value === 'string' && value.trim() === '') ||
+             (typeof value === 'number' && isNaN(value));
+    });
     
-    if (missing.length > 0) {
-      throw new Error(`Missing required fields: ${missing.join(', ')}`);
-    }
-    
-    return true;
+    return {
+      valid: missing.length === 0,
+      missing,
+      warnings: this.getValidationWarnings(entity)
+    };
   }
 
-  validateConsumedRow(consumedRow) {
-    const required = ['costCode', 'amount'];
-    const missing = required.filter(field => !consumedRow[field]);
+  /**
+   * Get validation warnings for estimate entity
+   */
+  getValidationWarnings(entity) {
+    const warnings = [];
     
-    if (missing.length > 0) {
-      throw new Error(`Missing required fields: ${missing.join(', ')}`);
+    if (!entity.description || entity.description.trim().length < 5) {
+      warnings.push('Description is very short or missing');
     }
     
-    return true;
+    if (entity.totalAmount <= 0) {
+      warnings.push('Total amount is zero or negative');
+    }
+    
+    if (entity.qty <= 0) {
+      warnings.push('Quantity is zero or negative');
+    }
+    
+    if (entity.rate <= 0 && entity.totalAmount > 0) {
+      warnings.push('Rate is zero but total amount is positive');
+    }
+    
+    if (entity.budgetedAmount > 0) {
+      const variance = Math.abs(entity.totalAmount - entity.budgetedAmount);
+      const variancePercent = (variance / entity.budgetedAmount) * 100;
+      
+      if (variancePercent > 50) {
+        warnings.push(`High budget variance: ${variancePercent.toFixed(1)}%`);
+      }
+    }
+    
+    return warnings;
   }
 }
 
 // Export singleton instance
-const entityProcessor = new EntityProcessor();
-export default entityProcessor;
+const estimateEntityProcessor = new EstimateEntityProcessor();
+export default estimateEntityProcessor;
