@@ -489,7 +489,7 @@ app.get('/api/stats', async (req, res) => {
           (SELECT SUM(budgeted_amount) FROM entities WHERE entity_type = 'estimate_row') as total_budgeted_value
       `),
       embeddingService.getPerformanceStats(db),
-      relationshipBuilder.getRelationshipStats(db)
+      relationshipBuilder.getEstimateRelationshipStats(db)
     ]);
 
     const stats = dbStats.rows[0];
@@ -597,6 +597,24 @@ app.get('/api/search/category/:category', async (req, res) => {
   }
 });
 
+// Delete all projects and data
+app.delete('/api/projects/all', async (req, res) => {
+  try {
+    await db.query('DELETE FROM embeddings');
+    await db.query('DELETE FROM relationships');
+    await db.query('DELETE FROM entities');
+    await db.query('DELETE FROM projects');
+    
+    res.json({
+      success: true,
+      message: 'All projects and data deleted'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 // Delete project and all related estimate data
 app.delete('/api/projects/:projectId', async (req, res) => {
   try {
@@ -622,6 +640,7 @@ app.delete('/api/projects/:projectId', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 
 // Helper Functions
 function calculateEstimateHealthScore(stats, costCodeSummary) {
