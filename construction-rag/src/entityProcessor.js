@@ -1,7 +1,7 @@
 /**
  * Estimate Entity Processor
  * Converts EstimateRow data into optimized entities for RAG
- * ESTIMATES ONLY - Removed consumed data processing for performance
+ * FIXED: Properly handles database UUID project IDs
  */
 
 import dotenv from 'dotenv';
@@ -78,9 +78,11 @@ class EstimateEntityProcessor {
 
   /**
    * Process single EstimateRow into optimized entity for RAG
+   * FIXED: Now accepts projectId parameter
    */
-  processEstimateRow(estimateRow, jobData) {
-    console.log(`🔄 DEBUG: Processing estimate row:`, {
+  processEstimateRow(estimateRow, jobData, projectId = null) {
+    console.log(`🔄 DEBUG: Processing estimate row with projectId: ${projectId}`);
+    console.log(`📊 DEBUG: Row data:`, {
       hasCostCode: !!estimateRow.costCode,
       hasDescription: !!estimateRow.description,
       hasTotal: estimateRow.total !== undefined,
@@ -156,7 +158,8 @@ class EstimateEntityProcessor {
       console.log(`✅ DEBUG: Generated content length: ${content.length} characters`);
 
       const entity = {
-        projectId: jobData.jobId || jobData.documentId,
+        // FIXED: Use the database project UUID instead of Firebase ID
+        projectId: projectId,  // This is now the database UUID
         entityType: 'estimate_row',
         costCode,
         description: this.createDisplayDescription(costCode, description),
@@ -182,6 +185,8 @@ class EstimateEntityProcessor {
 
       console.log(`🎯 DEBUG: Created entity:`, {
         projectId: entity.projectId,
+        projectIdType: typeof entity.projectId,
+        isUUID: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entity.projectId),
         costCode: entity.costCode,
         category: entity.category,
         totalAmount: entity.totalAmount,
@@ -311,21 +316,19 @@ ${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit econom
 
   /**
    * Process complete job estimates from Firebase
-   * FIXED: Changed from jobData.estimate to jobData.estimates (plural)
+   * FIXED: Now accepts projectId parameter for database UUID
    */
-  processJobEstimates(jobData) {
+  processJobEstimates(jobData, projectId = null) {
     console.log(`🚀 DEBUG: === STARTING ESTIMATE PROCESSING ===`);
-    console.log(`📊 DEBUG: Input jobData structure:`, {
+    console.log(`📊 DEBUG: Input parameters:`, {
       hasJobData: !!jobData,
-      jobDataType: typeof jobData,
+      projectId: projectId,
+      projectIdType: typeof projectId,
+      isUUID: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(projectId),
       jobDataKeys: jobData ? Object.keys(jobData) : 'null',
-      hasEstimate: !!(jobData?.estimate),        // OLD - checking singular
-      hasEstimates: !!(jobData?.estimates),      // NEW - checking plural
-      estimateType: typeof jobData?.estimate,    // OLD
-      estimatesType: typeof jobData?.estimates,  // NEW
-      estimateLength: jobData?.estimate?.length, // OLD
-      estimatesLength: jobData?.estimates?.length, // NEW
-      jobId: jobData?.jobId || jobData?.documentId,
+      hasEstimates: !!(jobData?.estimates),
+      estimatesLength: jobData?.estimates?.length,
+      firebaseJobId: jobData?.jobId || jobData?.documentId,
       projectTitle: jobData?.projectTitle || jobData?.jobTitle
     });
 
@@ -334,7 +337,12 @@ ${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit econom
       return [];
     }
 
-    // FIXED: Check for 'estimates' (plural) instead of 'estimate' (singular)
+    if (!projectId) {
+      console.error('❌ DEBUG: No projectId (database UUID) provided!');
+      throw new Error('projectId is required for entity processing');
+    }
+
+    // Check for 'estimates' property
     if (!jobData.estimates) {
       console.log('❌ DEBUG: No estimates property found in jobData');
       console.log('❌ DEBUG: Available jobData properties:', Object.keys(jobData));
@@ -402,7 +410,8 @@ ${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit econom
         }
 
         console.log(`✅ DEBUG: Valid estimate row found at index ${i}`);
-        const entity = this.processEstimateRow(estimateRow, jobData);
+        // FIXED: Pass projectId to processEstimateRow
+        const entity = this.processEstimateRow(estimateRow, jobData, projectId);
         entities.push(entity);
         processedCount++;
 
@@ -424,6 +433,8 @@ ${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit econom
 
     if (entities.length > 0) {
       console.log(`✅ DEBUG: Sample processed entity:`, {
+        projectId: entities[0].projectId,
+        projectIdType: typeof entities[0].projectId,
         costCode: entities[0].costCode,
         category: entities[0].category,
         totalAmount: entities[0].totalAmount,

@@ -1,6 +1,7 @@
 /**
  * Construction Estimate RAG Server
  * Express server focused exclusively on construction estimate data processing and analysis
+ * FIXED: Properly passes database UUID to entity processor
  */
 
 import express from 'express';
@@ -150,6 +151,7 @@ app.get('/api/projects/:projectId', async (req, res) => {
 });
 
 // Sync single job estimates from Firebase
+// FIXED: Now properly passes database UUID to entity processor
 app.post('/api/sync/job', async (req, res) => {
   try {
     const { companyId, jobId } = req.body;
@@ -174,7 +176,7 @@ app.post('/api/sync/job', async (req, res) => {
     }
 
     console.log(`✅ DEBUG: Job data fetched successfully:`);
-    console.log(`   - Job ID: ${jobData.jobId}`);
+    console.log(`   - Job ID (Firebase): ${jobData.jobId}`);
     console.log(`   - Project Title: ${jobData.projectTitle || jobData.jobTitle}`);
     console.log(`   - Client: ${jobData.clientName}`);
     console.log(`   - Raw estimates array length: ${jobData.estimates?.length || 0}`);
@@ -216,28 +218,39 @@ app.post('/api/sync/job', async (req, res) => {
     // Step 2: Create/update project in database
     console.log(`💾 DEBUG: Creating/updating project in database...`);
     const project = await db.createProject(
-      jobId,
+      jobId,  // This is the Firebase ID used as reference
       jobData.jobTitle || jobData.projectTitle || 'Unknown Project',
       jobData.clientName || 'Unknown Client',
       {
         ...jobData.metadata,
         estimateCount: jobData.estimates.length,
+        firebaseJobId: jobId,  // Store original Firebase ID
+        companyId: companyId,
         syncedAt: new Date().toISOString()
       }
     );
-    console.log(`✅ DEBUG: Project created/updated with ID: ${project.id}`);
-
-    // Step 3: Process estimate entities with detailed logging
-    console.log(`🔄 DEBUG: Processing estimate entities...`);
-    console.log(`📊 DEBUG: Input data for entityProcessor:`);
-    console.log(`   - jobData.estimates length: ${jobData.estimates.length}`);
-    console.log(`   - jobData structure keys: ${Object.keys(jobData)}`);
     
-    const entities = entityProcessor.processJobEstimates(jobData);
+    console.log(`✅ DEBUG: Project created/updated:`);
+    console.log(`   - Database UUID: ${project.id}`);
+    console.log(`   - Firebase ID: ${jobId}`);
+    console.log(`   - Firebase ID field in DB: ${project.firebase_id}`);
+
+    // Step 3: Process estimate entities - PASS THE DATABASE PROJECT UUID!
+    console.log(`🔄 DEBUG: Processing estimate entities with database project UUID: ${project.id}...`);
+    const entities = entityProcessor.processJobEstimates(jobData, project.id);  // Pass the database UUID!
     
     console.log(`📊 DEBUG: EntityProcessor results:`);
     console.log(`   - Processed entities count: ${entities.length}`);
-    console.log(`   - Sample entity keys: ${entities.length > 0 ? Object.keys(entities[0]) : 'none'}`);
+    
+    if (entities.length > 0) {
+      console.log(`   - Sample entity:`, {
+        projectId: entities[0].projectId,
+        projectIdType: typeof entities[0].projectId,
+        isUUID: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entities[0].projectId),
+        costCode: entities[0].costCode,
+        category: entities[0].category
+      });
+    }
     
     if (entities.length === 0) {
       console.log(`⚠️ DEBUG: EntityProcessor returned 0 entities. Investigating...`);
@@ -252,23 +265,6 @@ app.post('/api/sync/job', async (req, res) => {
       console.log(`   - Total estimates: ${jobData.estimates.length}`);
       console.log(`   - Valid estimates: ${validEstimates.length}`);
       console.log(`   - Invalid estimates: ${jobData.estimates.length - validEstimates.length}`);
-      
-      // Show first few invalid estimates
-      const invalidEstimates = jobData.estimates.filter(est => 
-        !est || (!est.costCode && !est.description) || 
-        (est.total === undefined && est.amount === undefined)
-      );
-      
-      console.log(`❌ DEBUG: First 3 invalid estimates:`, invalidEstimates.slice(0, 3).map((est, i) => ({
-        index: i,
-        exists: !!est,
-        costCode: est?.costCode,
-        description: est?.description?.substring(0, 30),
-        total: est?.total,
-        amount: est?.amount,
-        hasRequiredData: !!(est?.costCode || est?.description),
-        hasAmount: !!(est?.total !== undefined || est?.amount !== undefined)
-      })));
 
       return res.json({
         success: true,
@@ -278,23 +274,13 @@ app.post('/api/sync/job', async (req, res) => {
         debug: {
           totalEstimates: jobData.estimates.length,
           validEstimates: validEstimates.length,
-          invalidEstimates: invalidEstimates.length,
-          sampleInvalid: invalidEstimates.slice(0, 3)
+          invalidEstimates: jobData.estimates.length - validEstimates.length
         }
       });
     }
 
-    // Step 4: Generate embeddings and store everything with detailed logging
+    // Step 4: Generate embeddings and store everything
     console.log(`🔮 DEBUG: Processing embeddings for ${entities.length} entities...`);
-    console.log(`📊 DEBUG: Sample entity for embedding:`, {
-      costCode: entities[0]?.costCode,
-      description: entities[0]?.description?.substring(0, 50),
-      category: entities[0]?.category,
-      totalAmount: entities[0]?.totalAmount,
-      hasContent: !!entities[0]?.content,
-      contentLength: entities[0]?.content?.length
-    });
-
     const result = await embeddingService.processEstimateEntities(entities, db);
     
     console.log(`✅ DEBUG: Embedding processing completed:`);
@@ -314,7 +300,12 @@ app.post('/api/sync/job', async (req, res) => {
 
     res.json({
       success: true,
-      project,
+      project: {
+        id: project.id,
+        firebase_id: project.firebase_id,
+        title: project.title,
+        client_name: project.client_name
+      },
       stats: {
         entities: result.entities.length,
         embeddings: result.embeddings.length,
@@ -333,6 +324,8 @@ app.post('/api/sync/job', async (req, res) => {
       },
       processingStats: result.processingStats,
       debug: {
+        projectUUID: project.id,
+        firebaseJobId: jobId,
         rawEstimatesCount: jobData.estimates.length,
         validEstimatesCount: jobData.validEstimateCount,
         processedEntitiesCount: entities.length,
@@ -346,12 +339,14 @@ app.post('/api/sync/job', async (req, res) => {
     console.error('❌ DEBUG: Error stack:', error.stack);
     res.status(500).json({ 
       error: error.message,
-      details: error.stack
+      details: error.stack,
+      type: error.name
     });
   }
 });
 
 // Bulk sync all estimate data from Firebase
+// FIXED: Now properly passes database UUID to entity processor
 app.post('/api/sync/all', async (req, res) => {
   try {
     const { companyId } = req.body; // Optional - sync specific company or all
@@ -390,20 +385,24 @@ app.post('/api/sync/all', async (req, res) => {
       try {
         console.log(`📋 Processing job ${jobData.jobId}: ${jobData.jobTitle || 'Untitled'}`);
 
-        // Create project
+        // Create project and get database UUID
         const project = await db.createProject(
-          jobData.jobId,
+          jobData.jobId,  // Firebase ID for reference
           jobData.jobTitle || 'Unknown Project',
           jobData.clientName || 'Unknown Client',
           {
             ...jobData.metadata,
             estimateCount: jobData.estimates.length,
+            firebaseJobId: jobData.jobId,
+            companyId: jobData.companyId,
             syncedAt: new Date().toISOString()
           }
         );
 
-        // Process estimate entities
-        const entities = entityProcessor.processJobEstimates(jobData);
+        console.log(`✅ DEBUG: Created/updated project - DB UUID: ${project.id}, Firebase ID: ${jobData.jobId}`);
+
+        // Process estimate entities with the database UUID
+        const entities = entityProcessor.processJobEstimates(jobData, project.id);  // Pass the database UUID!
         
         if (entities.length > 0) {
           // Generate embeddings
@@ -428,7 +427,7 @@ app.post('/api/sync/all', async (req, res) => {
         }
 
         results.processed++;
-        console.log(`✅ Processed job ${jobData.jobId} (${entities.length} entities)`);
+        console.log(`✅ Processed job ${jobData.jobId} with DB ID ${project.id} (${entities.length} entities)`);
         
       } catch (error) {
         console.error(`❌ Failed to process job ${jobData.jobId}:`, error.message);
@@ -436,7 +435,8 @@ app.post('/api/sync/all', async (req, res) => {
         results.errors.push({
           jobId: jobData.jobId,
           jobTitle: jobData.jobTitle,
-          error: error.message
+          error: error.message,
+          type: error.name
         });
       }
     }
@@ -471,7 +471,8 @@ app.post('/api/sync/all', async (req, res) => {
     console.error('❌ Error in bulk estimate sync:', error.message);
     res.status(500).json({ 
       error: error.message,
-      details: error.stack
+      details: error.stack,
+      type: error.name
     });
   }
 });
@@ -869,6 +870,7 @@ app.use((error, req, res, next) => {
   res.status(500).json({
     error: 'Internal server error',
     message: error.message,
+    type: error.name,
     timestamp: new Date().toISOString()
   });
 });

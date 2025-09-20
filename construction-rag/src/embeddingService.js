@@ -1,6 +1,7 @@
 /**
  * Optimized Embedding Service
  * High-performance embeddings with caching and batching for estimate data
+ * FIXED: Better UUID validation and error handling
  */
 
 import OpenAI from 'openai';
@@ -40,6 +41,15 @@ class OptimizedEmbeddingService {
     
     console.log('✅ Optimized Embedding service initialized');
     console.log(`🚀 Model: ${this.model} | Batch: ${this.maxBatchSize} | Cache: ${this.maxCacheSize}`);
+  }
+
+  /**
+   * Validate UUID format
+   */
+  isValidUUID(uuid) {
+    if (!uuid) return false;
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(uuid);
   }
 
   /**
@@ -286,6 +296,7 @@ class OptimizedEmbeddingService {
 
   /**
    * Process entities and generate embeddings efficiently
+   * FIXED: Better validation and error handling for UUIDs
    */
   async processEstimateEntities(entities, db) {
     console.log(`🚀 DEBUG: === STARTING EMBEDDING PROCESSING ===`);
@@ -312,9 +323,22 @@ class OptimizedEmbeddingService {
           hasContent: !!entity.content,
           contentType: typeof entity.content,
           contentLength: entity.content?.length || 0,
+          projectId: entity.projectId,
+          projectIdType: typeof entity.projectId,
+          isValidUUID: this.isValidUUID(entity.projectId),
           costCode: entity.costCode,
           description: entity.description?.substring(0, 30)
         });
+
+        // Check for valid UUID
+        if (!this.isValidUUID(entity.projectId)) {
+          console.error(`❌ DEBUG: Entity ${index + 1} has invalid projectId (not a UUID):`, {
+            projectId: entity.projectId,
+            projectIdType: typeof entity.projectId,
+            costCode: entity.costCode
+          });
+          return false;
+        }
 
         if (!entity.content || entity.content.trim().length === 0) {
           console.warn(`⚠️ DEBUG: Skipping entity ${index + 1} with empty content:`, {
@@ -326,7 +350,7 @@ class OptimizedEmbeddingService {
           return false;
         }
         
-        console.log(`✅ DEBUG: Entity ${index + 1} has valid content (${entity.content.length} chars)`);
+        console.log(`✅ DEBUG: Entity ${index + 1} has valid content and UUID (${entity.content.length} chars)`);
         return true;
       });
 
@@ -336,12 +360,15 @@ class OptimizedEmbeddingService {
       console.log(`   - Invalid entities: ${entities.length - validEntities.length}`);
 
       if (validEntities.length === 0) {
-        console.log(`❌ DEBUG: No entities with valid content found!`);
+        console.log(`❌ DEBUG: No entities with valid content and UUID found!`);
         
         // Debug: Show first few entities to understand the issue
         console.log(`🔍 DEBUG: Sample of invalid entities:`);
         entities.slice(0, 3).forEach((entity, i) => {
           console.log(`   Entity ${i + 1}:`, {
+            projectId: entity?.projectId,
+            projectIdType: typeof entity?.projectId,
+            isValidUUID: this.isValidUUID(entity?.projectId),
             costCode: entity?.costCode,
             description: entity?.description?.substring(0, 30),
             hasContent: !!entity?.content,
@@ -356,9 +383,14 @@ class OptimizedEmbeddingService {
           embeddings: [], 
           total: 0,
           debug: {
-            reason: 'no_valid_content',
+            reason: 'no_valid_content_or_invalid_uuid',
             totalEntities: entities.length,
-            sampleEntity: entities[0] ? Object.keys(entities[0]) : 'none'
+            sampleEntity: entities[0] ? {
+              projectId: entities[0].projectId,
+              projectIdType: typeof entities[0].projectId,
+              isValidUUID: this.isValidUUID(entities[0].projectId),
+              keys: Object.keys(entities[0])
+            } : 'none'
           }
         };
       }
@@ -367,9 +399,9 @@ class OptimizedEmbeddingService {
       console.log(`🔮 DEBUG: Generating embeddings for ${validEntities.length} entities...`);
       const contents = validEntities.map(entity => entity.content);
       
-      console.log(`📋 DEBUG: Content samples (first 2):`, {
-        content1: contents[0]?.substring(0, 100) + '...',
-        content2: contents[1]?.substring(0, 100) + '...'
+      console.log(`📋 DEBUG: Content samples (first 2):`);
+      contents.slice(0, 2).forEach((content, i) => {
+        console.log(`   Content ${i + 1}: ${content.substring(0, 100)}...`);
       });
 
       const embeddings = await this.generateEmbeddingsBatch(contents);
@@ -379,31 +411,35 @@ class OptimizedEmbeddingService {
       console.log(`   - Embeddings received: ${embeddings.length}`);
       console.log(`   - Non-null embeddings: ${embeddings.filter(emb => emb !== null).length}`);
       
-      // Filter out failed embeddings
-      const successfulEmbeddings = embeddings.filter(emb => emb !== null);
-      
-      if (successfulEmbeddings.length !== validEntities.length) {
-        console.warn(`⚠️ DEBUG: Some embeddings failed: ${successfulEmbeddings.length}/${validEntities.length} successful`);
-      }
-      
       // Store entities in database
       console.log('💾 DEBUG: Storing entities in database...');
-      console.log(`📊 DEBUG: Entities to store:`, {
-        count: validEntities.length,
-        sampleEntity: validEntities[0] ? {
-          projectId: validEntities[0].projectId,
-          costCode: validEntities[0].costCode,
-          category: validEntities[0].category,
-          totalAmount: validEntities[0].totalAmount,
-          hasContent: !!validEntities[0].content
-        } : 'none'
+      console.log(`📊 DEBUG: Sample entity for database storage:`, {
+        projectId: validEntities[0].projectId,
+        projectIdType: typeof validEntities[0].projectId,
+        isValidUUID: this.isValidUUID(validEntities[0].projectId),
+        costCode: validEntities[0].costCode,
+        category: validEntities[0].category,
+        totalAmount: validEntities[0].totalAmount,
+        hasContent: !!validEntities[0].content
       });
 
-      const storedEntities = await db.createEntitiesBatch(validEntities);
-      
-      console.log(`✅ DEBUG: Database storage results:`);
-      console.log(`   - Entities to store: ${validEntities.length}`);
-      console.log(`   - Entities stored: ${storedEntities.length}`);
+      let storedEntities = [];
+      try {
+        storedEntities = await db.createEntitiesBatch(validEntities);
+        console.log(`✅ DEBUG: Database storage successful: ${storedEntities.length} entities`);
+      } catch (dbError) {
+        console.error(`❌ DEBUG: Database storage failed:`, dbError.message);
+        console.error(`❌ DEBUG: First entity projectId:`, validEntities[0]?.projectId);
+        console.error(`❌ DEBUG: Is valid UUID?:`, this.isValidUUID(validEntities[0]?.projectId));
+        
+        // Additional debugging
+        if (dbError.message.includes('invalid input syntax for type uuid')) {
+          console.error(`❌ DEBUG: UUID validation failed. Expected format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`);
+          console.error(`❌ DEBUG: Received projectId: "${validEntities[0]?.projectId}"`);
+        }
+        
+        throw dbError;
+      }
 
       if (storedEntities.length === 0) {
         console.error(`❌ DEBUG: Failed to store entities in database!`);
@@ -449,7 +485,7 @@ class OptimizedEmbeddingService {
         debug: {
           inputEntities: entities.length,
           validEntities: validEntities.length,
-          successfulEmbeddings: successfulEmbeddings.length,
+          successfulEmbeddings: embeddings.filter(e => e !== null).length,
           storedEntities: storedEntities.length,
           storedEmbeddings: storedEmbeddings.length
         }
