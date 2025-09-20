@@ -288,46 +288,130 @@ class OptimizedEmbeddingService {
    * Process entities and generate embeddings efficiently
    */
   async processEstimateEntities(entities, db) {
+    console.log(`🚀 DEBUG: === STARTING EMBEDDING PROCESSING ===`);
+    console.log(`📊 DEBUG: Input entities:`, {
+      entitiesProvided: !!entities,
+      entitiesType: typeof entities,
+      entitiesIsArray: Array.isArray(entities),
+      entitiesLength: entities?.length || 0
+    });
+
     if (!entities || entities.length === 0) {
-      console.log('⚠️ No entities to process');
+      console.log('⚠️ DEBUG: No entities provided for embedding processing');
       return { entities: [], embeddings: [], total: 0 };
     }
 
-    console.log(`🔄 Processing embeddings for ${entities.length} estimate entities...`);
+    console.log(`🔄 DEBUG: Processing embeddings for ${entities.length} estimate entities...`);
     const startTime = Date.now();
     
     try {
-      // Validate entities first
-      const validEntities = entities.filter(entity => {
+      // Validate entities first with detailed logging
+      console.log(`🔍 DEBUG: Validating entity content...`);
+      const validEntities = entities.filter((entity, index) => {
+        console.log(`📋 DEBUG: Checking entity ${index + 1}:`, {
+          hasContent: !!entity.content,
+          contentType: typeof entity.content,
+          contentLength: entity.content?.length || 0,
+          costCode: entity.costCode,
+          description: entity.description?.substring(0, 30)
+        });
+
         if (!entity.content || entity.content.trim().length === 0) {
-          console.warn('Skipping entity with empty content');
+          console.warn(`⚠️ DEBUG: Skipping entity ${index + 1} with empty content:`, {
+            costCode: entity.costCode,
+            description: entity.description?.substring(0, 30),
+            hasContent: !!entity.content,
+            contentLength: entity.content?.length || 0
+          });
           return false;
         }
+        
+        console.log(`✅ DEBUG: Entity ${index + 1} has valid content (${entity.content.length} chars)`);
         return true;
       });
 
-      console.log(`✅ ${validEntities.length}/${entities.length} entities have valid content`);
+      console.log(`✅ DEBUG: Content validation complete:`);
+      console.log(`   - Input entities: ${entities.length}`);
+      console.log(`   - Valid entities: ${validEntities.length}`);
+      console.log(`   - Invalid entities: ${entities.length - validEntities.length}`);
+
+      if (validEntities.length === 0) {
+        console.log(`❌ DEBUG: No entities with valid content found!`);
+        
+        // Debug: Show first few entities to understand the issue
+        console.log(`🔍 DEBUG: Sample of invalid entities:`);
+        entities.slice(0, 3).forEach((entity, i) => {
+          console.log(`   Entity ${i + 1}:`, {
+            costCode: entity?.costCode,
+            description: entity?.description?.substring(0, 30),
+            hasContent: !!entity?.content,
+            contentType: typeof entity?.content,
+            contentValue: entity?.content?.substring(0, 100),
+            allKeys: entity ? Object.keys(entity) : 'null'
+          });
+        });
+
+        return { 
+          entities: [], 
+          embeddings: [], 
+          total: 0,
+          debug: {
+            reason: 'no_valid_content',
+            totalEntities: entities.length,
+            sampleEntity: entities[0] ? Object.keys(entities[0]) : 'none'
+          }
+        };
+      }
 
       // Generate embeddings for all entity content
+      console.log(`🔮 DEBUG: Generating embeddings for ${validEntities.length} entities...`);
       const contents = validEntities.map(entity => entity.content);
+      
+      console.log(`📋 DEBUG: Content samples (first 2):`, {
+        content1: contents[0]?.substring(0, 100) + '...',
+        content2: contents[1]?.substring(0, 100) + '...'
+      });
+
       const embeddings = await this.generateEmbeddingsBatch(contents);
+      
+      console.log(`📊 DEBUG: Embedding generation results:`);
+      console.log(`   - Contents sent: ${contents.length}`);
+      console.log(`   - Embeddings received: ${embeddings.length}`);
+      console.log(`   - Non-null embeddings: ${embeddings.filter(emb => emb !== null).length}`);
       
       // Filter out failed embeddings
       const successfulEmbeddings = embeddings.filter(emb => emb !== null);
       
       if (successfulEmbeddings.length !== validEntities.length) {
-        console.warn(`⚠️ Some embeddings failed: ${successfulEmbeddings.length}/${validEntities.length} successful`);
+        console.warn(`⚠️ DEBUG: Some embeddings failed: ${successfulEmbeddings.length}/${validEntities.length} successful`);
       }
       
       // Store entities in database
-      console.log('💾 Storing entities in database...');
+      console.log('💾 DEBUG: Storing entities in database...');
+      console.log(`📊 DEBUG: Entities to store:`, {
+        count: validEntities.length,
+        sampleEntity: validEntities[0] ? {
+          projectId: validEntities[0].projectId,
+          costCode: validEntities[0].costCode,
+          category: validEntities[0].category,
+          totalAmount: validEntities[0].totalAmount,
+          hasContent: !!validEntities[0].content
+        } : 'none'
+      });
+
       const storedEntities = await db.createEntitiesBatch(validEntities);
       
+      console.log(`✅ DEBUG: Database storage results:`);
+      console.log(`   - Entities to store: ${validEntities.length}`);
+      console.log(`   - Entities stored: ${storedEntities.length}`);
+
       if (storedEntities.length === 0) {
+        console.error(`❌ DEBUG: Failed to store entities in database!`);
         throw new Error('Failed to store entities in database');
       }
 
       // Prepare embedding data for successful embeddings only
+      console.log(`🔗 DEBUG: Preparing embedding data for storage...`);
       const embeddingData = [];
       storedEntities.forEach((entity, index) => {
         if (embeddings[index] !== null) {
@@ -335,16 +419,23 @@ class OptimizedEmbeddingService {
             entityId: entity.id,
             embedding: embeddings[index]
           });
+          console.log(`📎 DEBUG: Added embedding for entity ${entity.id} (${entity.cost_code})`);
+        } else {
+          console.warn(`⚠️ DEBUG: No embedding for entity ${entity.id} (${entity.cost_code})`);
         }
       });
       
       // Store embeddings in database
-      console.log(`🔮 Storing ${embeddingData.length} embeddings in database...`);
+      console.log(`🔮 DEBUG: Storing ${embeddingData.length} embeddings in database...`);
       const storedEmbeddings = await db.createEmbeddingsBatch(embeddingData);
       
+      console.log(`✅ DEBUG: Embedding storage results:`);
+      console.log(`   - Embeddings to store: ${embeddingData.length}`);
+      console.log(`   - Embeddings stored: ${storedEmbeddings.length}`);
+      
       const totalDuration = Date.now() - startTime;
-      console.log(`🎉 Processing completed in ${totalDuration}ms`);
-      console.log(`📊 Final counts: ${storedEntities.length} entities, ${storedEmbeddings.length} embeddings`);
+      console.log(`🎉 DEBUG: Processing completed in ${totalDuration}ms`);
+      console.log(`📊 DEBUG: Final counts: ${storedEntities.length} entities, ${storedEmbeddings.length} embeddings`);
       
       return {
         entities: storedEntities,
@@ -354,11 +445,19 @@ class OptimizedEmbeddingService {
           totalDuration,
           cacheHitRate: this.cacheHits / (this.cacheHits + this.cacheMisses),
           averageEmbeddingTime: totalDuration / Math.max(1, storedEmbeddings.length)
+        },
+        debug: {
+          inputEntities: entities.length,
+          validEntities: validEntities.length,
+          successfulEmbeddings: successfulEmbeddings.length,
+          storedEntities: storedEntities.length,
+          storedEmbeddings: storedEmbeddings.length
         }
       };
       
     } catch (error) {
-      console.error('❌ Error processing estimate entities:', error.message);
+      console.error('❌ DEBUG: Error processing estimate entities:', error.message);
+      console.error('❌ DEBUG: Error stack:', error.stack);
       throw error;
     }
   }

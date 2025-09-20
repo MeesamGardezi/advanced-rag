@@ -39,6 +39,8 @@ class EstimateEntityProcessor {
    * Smart category detection from cost codes and descriptions
    */
   detectCategory(costCode, description) {
+    console.log(`🔍 DEBUG: Detecting category for costCode="${costCode}", description="${description?.substring(0, 30)}..."`);
+    
     const checkText = `${costCode || ''} ${description || ''}`.toLowerCase();
     
     // Check cost code patterns first (more reliable)
@@ -47,7 +49,10 @@ class EstimateEntityProcessor {
         pattern.test(costCode || '')
       );
       
-      if (costCodeMatch) return category;
+      if (costCodeMatch) {
+        console.log(`✅ DEBUG: Category detected via cost code pattern: "${category}"`);
+        return category;
+      }
     }
     
     // Check description patterns with scoring
@@ -65,13 +70,24 @@ class EstimateEntityProcessor {
     const bestCategory = Object.entries(categoryScores)
       .reduce((a, b) => categoryScores[a[0]] > categoryScores[b[0]] ? a : b);
     
-    return bestCategory[1] > 0 ? bestCategory[0] : 'other';
+    const detectedCategory = bestCategory[1] > 0 ? bestCategory[0] : 'other';
+    console.log(`📊 DEBUG: Category scores:`, categoryScores, `-> Selected: "${detectedCategory}"`);
+    
+    return detectedCategory;
   }
 
   /**
    * Process single EstimateRow into optimized entity for RAG
    */
   processEstimateRow(estimateRow, jobData) {
+    console.log(`🔄 DEBUG: Processing estimate row:`, {
+      hasCostCode: !!estimateRow.costCode,
+      hasDescription: !!estimateRow.description,
+      hasTotal: estimateRow.total !== undefined,
+      hasAmount: estimateRow.amount !== undefined,
+      keys: Object.keys(estimateRow)
+    });
+
     try {
       // Extract and validate fields
       const costCode = (estimateRow.costCode || '').toString().trim();
@@ -79,12 +95,23 @@ class EstimateEntityProcessor {
       const taskScope = (estimateRow.taskScope || '').toString().trim();
       const area = (estimateRow.area || '').toString().trim();
       
+      console.log(`📋 DEBUG: Extracted basic fields:`, {
+        costCode: costCode || 'EMPTY',
+        description: description?.substring(0, 50) || 'EMPTY',
+        taskScope: taskScope || 'EMPTY',
+        area: area || 'EMPTY'
+      });
+      
       // Parse numeric values safely
       const qty = this.parseNumber(estimateRow.qty);
       const rate = this.parseNumber(estimateRow.rate);
       const total = this.parseNumber(estimateRow.total);
       const budgetedRate = this.parseNumber(estimateRow.budgetedRate);
       const budgetedTotal = this.parseNumber(estimateRow.budgetedTotal);
+      
+      console.log(`💰 DEBUG: Parsed numeric values:`, {
+        qty, rate, total, budgetedRate, budgetedTotal
+      });
       
       const units = (estimateRow.units || 'ea').toString().trim();
       const notes = (estimateRow.notesRemarks || '').toString().trim();
@@ -97,10 +124,15 @@ class EstimateEntityProcessor {
       const variance = total - budgetedTotal;
       const variancePercent = budgetedTotal > 0 ? ((variance / budgetedTotal) * 100) : 0;
       
+      console.log(`📊 DEBUG: Calculated values:`, {
+        variance, variancePercent, materialsCount: materials.length
+      });
+      
       // Smart category detection
       const category = this.detectCategory(costCode, description);
       
       // Generate optimized content for embeddings
+      console.log(`🔮 DEBUG: Generating content for embeddings...`);
       const content = this.generateOptimizedEstimateContent({
         costCode,
         description,
@@ -121,7 +153,9 @@ class EstimateEntityProcessor {
         jobData
       });
 
-      return {
+      console.log(`✅ DEBUG: Generated content length: ${content.length} characters`);
+
+      const entity = {
         projectId: jobData.jobId || jobData.documentId,
         entityType: 'estimate_row',
         costCode,
@@ -146,9 +180,20 @@ class EstimateEntityProcessor {
         notes: notes || null
       };
 
+      console.log(`🎯 DEBUG: Created entity:`, {
+        projectId: entity.projectId,
+        costCode: entity.costCode,
+        category: entity.category,
+        totalAmount: entity.totalAmount,
+        hasContent: !!entity.content,
+        contentLength: entity.content?.length
+      });
+
+      return entity;
+
     } catch (error) {
-      console.error('Error processing estimate row:', error.message);
-      console.error('Raw estimate data:', JSON.stringify(estimateRow, null, 2));
+      console.error('❌ DEBUG: Error processing estimate row:', error.message);
+      console.error('❌ DEBUG: Raw estimate data:', JSON.stringify(estimateRow, null, 2));
       throw new Error(`Failed to process estimate row: ${error.message}`);
     }
   }
@@ -157,11 +202,22 @@ class EstimateEntityProcessor {
    * Parse number values safely
    */
   parseNumber(value) {
-    if (typeof value === 'number') return isNaN(value) ? 0 : value;
+    console.log(`🔢 DEBUG: Parsing number from:`, { value, type: typeof value });
+    
+    if (typeof value === 'number') {
+      const result = isNaN(value) ? 0 : value;
+      console.log(`📊 DEBUG: Number result: ${result}`);
+      return result;
+    }
+    
     if (typeof value === 'string') {
       const parsed = parseFloat(value.replace(/[^\d.-]/g, ''));
-      return isNaN(parsed) ? 0 : parsed;
+      const result = isNaN(parsed) ? 0 : parsed;
+      console.log(`📊 DEBUG: String->Number result: "${value}" -> ${result}`);
+      return result;
     }
+    
+    console.log(`📊 DEBUG: Default number result: 0 (from ${typeof value})`);
     return 0;
   }
 
@@ -179,6 +235,8 @@ class EstimateEntityProcessor {
    * Generate optimized content for embeddings - focused on estimate data
    */
   generateOptimizedEstimateContent(data) {
+    console.log(`🔮 DEBUG: Generating optimized content with data keys:`, Object.keys(data));
+    
     const {
       costCode, description, taskScope, area, qty, rate, total, budgetedRate, 
       budgetedTotal, variance, variancePercent, units, materials, notes, 
@@ -217,7 +275,7 @@ class EstimateEntityProcessor {
       other: `Construction item for ${qty} ${units}.`
     };
 
-    return `
+    const content = `
 CONSTRUCTION ESTIMATE: ${jobData.projectTitle || 'Unknown Project'}
 Client: ${jobData.clientName || 'Unknown Client'}
 Location: ${jobData.siteCity ? `${jobData.siteCity}, ${jobData.siteState || ''}` : 'Unknown Location'}
@@ -246,50 +304,134 @@ COST ANALYSIS:
 This ${category} item ${variance > 0 ? 'exceeds' : variance < 0 ? 'is under' : 'meets'} the budgeted amount${budgetedTotal > 0 ? ` by $${Math.abs(variance).toFixed(2)}` : ''}. 
 ${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit economics: $${rate.toFixed(2)}/${units}` : ''}
     `.trim();
+
+    console.log(`✅ DEBUG: Generated content preview:`, content.substring(0, 200) + '...');
+    return content;
   }
 
   /**
    * Process complete job estimates from Firebase
+   * FIXED: Changed from jobData.estimate to jobData.estimates (plural)
    */
   processJobEstimates(jobData) {
+    console.log(`🚀 DEBUG: === STARTING ESTIMATE PROCESSING ===`);
+    console.log(`📊 DEBUG: Input jobData structure:`, {
+      hasJobData: !!jobData,
+      jobDataType: typeof jobData,
+      jobDataKeys: jobData ? Object.keys(jobData) : 'null',
+      hasEstimate: !!(jobData?.estimate),        // OLD - checking singular
+      hasEstimates: !!(jobData?.estimates),      // NEW - checking plural
+      estimateType: typeof jobData?.estimate,    // OLD
+      estimatesType: typeof jobData?.estimates,  // NEW
+      estimateLength: jobData?.estimate?.length, // OLD
+      estimatesLength: jobData?.estimates?.length, // NEW
+      jobId: jobData?.jobId || jobData?.documentId,
+      projectTitle: jobData?.projectTitle || jobData?.jobTitle
+    });
+
     if (!jobData) {
-      console.log('No job data provided');
+      console.log('❌ DEBUG: No job data provided');
       return [];
     }
 
-    if (!jobData.estimate || !Array.isArray(jobData.estimate) || jobData.estimate.length === 0) {
-      console.log(`No estimates found for job ${jobData.jobId || jobData.documentId}`);
+    // FIXED: Check for 'estimates' (plural) instead of 'estimate' (singular)
+    if (!jobData.estimates) {
+      console.log('❌ DEBUG: No estimates property found in jobData');
+      console.log('❌ DEBUG: Available jobData properties:', Object.keys(jobData));
+      
+      // Also check if the old 'estimate' property exists for backward compatibility
+      if (jobData.estimate) {
+        console.log('⚠️ DEBUG: Found "estimate" (singular) property, using that instead');
+        jobData.estimates = jobData.estimate; // Use the singular version
+      } else {
+        return [];
+      }
+    }
+
+    if (!Array.isArray(jobData.estimates)) {
+      console.log('❌ DEBUG: estimates property is not an array:', {
+        estimatesType: typeof jobData.estimates,
+        estimatesValue: jobData.estimates
+      });
       return [];
     }
 
-    console.log(`Processing ${jobData.estimate.length} estimates for ${jobData.projectTitle || 'Unknown Project'}...`);
+    if (jobData.estimates.length === 0) {
+      console.log(`❌ DEBUG: Empty estimates array for job ${jobData.jobId || jobData.documentId}`);
+      return [];
+    }
+
+    console.log(`📊 DEBUG: Processing ${jobData.estimates.length} estimates for "${jobData.projectTitle || jobData.jobTitle || 'Unknown Project'}"...`);
+
+    // Debug first few estimates
+    console.log(`🔍 DEBUG: Sample estimates (first 3):`);
+    jobData.estimates.slice(0, 3).forEach((estimate, i) => {
+      console.log(`   Estimate ${i + 1}:`, {
+        costCode: estimate?.costCode,
+        description: estimate?.description?.substring(0, 40),
+        total: estimate?.total,
+        amount: estimate?.amount,
+        hasRequiredData: !!(estimate?.costCode || estimate?.description),
+        hasAmountData: !!(estimate?.total !== undefined || estimate?.amount !== undefined),
+        allKeys: estimate ? Object.keys(estimate) : 'null'
+      });
+    });
 
     const entities = [];
     let processedCount = 0;
     let errorCount = 0;
+    let skippedCount = 0;
 
-    for (let i = 0; i < jobData.estimate.length; i++) {
+    for (let i = 0; i < jobData.estimates.length; i++) {
       try {
-        const estimateRow = jobData.estimate[i];
+        const estimateRow = jobData.estimates[i];
+        
+        console.log(`🔄 DEBUG: Processing estimate ${i + 1}/${jobData.estimates.length}`);
         
         // Skip empty or invalid rows
         if (!this.isValidEstimateRow(estimateRow)) {
-          console.log(`Skipping invalid estimate row at index ${i}`);
+          console.log(`⚠️ DEBUG: Skipping invalid estimate row at index ${i}:`, {
+            exists: !!estimateRow,
+            costCode: estimateRow?.costCode,
+            description: estimateRow?.description?.substring(0, 30),
+            total: estimateRow?.total,
+            amount: estimateRow?.amount
+          });
+          skippedCount++;
           continue;
         }
 
+        console.log(`✅ DEBUG: Valid estimate row found at index ${i}`);
         const entity = this.processEstimateRow(estimateRow, jobData);
         entities.push(entity);
         processedCount++;
 
       } catch (error) {
-        console.error(`Failed to process estimate row ${i}:`, error.message);
+        console.error(`❌ DEBUG: Failed to process estimate row ${i}:`, error.message);
+        console.error(`❌ DEBUG: Problematic estimate row:`, jobData.estimates[i]);
         errorCount++;
         // Continue processing other rows
       }
     }
 
-    console.log(`Processed ${processedCount}/${jobData.estimate.length} estimates (${errorCount} errors)`);
+    console.log(`🎯 DEBUG: === PROCESSING COMPLETE ===`);
+    console.log(`📈 DEBUG: Final results:`);
+    console.log(`   - Total estimates in input: ${jobData.estimates.length}`);
+    console.log(`   - Successfully processed: ${processedCount}`);
+    console.log(`   - Skipped (invalid): ${skippedCount}`);
+    console.log(`   - Errors: ${errorCount}`);
+    console.log(`   - Final entity count: ${entities.length}`);
+
+    if (entities.length > 0) {
+      console.log(`✅ DEBUG: Sample processed entity:`, {
+        costCode: entities[0].costCode,
+        category: entities[0].category,
+        totalAmount: entities[0].totalAmount,
+        hasContent: !!entities[0].content,
+        contentLength: entities[0].content?.length
+      });
+    }
+
     return entities;
   }
 
@@ -297,20 +439,42 @@ ${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit econom
    * Validate estimate row has minimum required data
    */
   isValidEstimateRow(estimateRow) {
-    if (!estimateRow || typeof estimateRow !== 'object') return false;
+    console.log(`🔍 DEBUG: Validating estimate row:`, {
+      exists: !!estimateRow,
+      type: typeof estimateRow,
+      keys: estimateRow ? Object.keys(estimateRow) : 'null'
+    });
+
+    if (!estimateRow || typeof estimateRow !== 'object') {
+      console.log(`❌ DEBUG: Invalid estimate row - not an object`);
+      return false;
+    }
     
     // Must have at least a cost code or description
     const hasCostCode = estimateRow.costCode && estimateRow.costCode.toString().trim().length > 0;
     const hasDescription = estimateRow.description && estimateRow.description.toString().trim().length > 0;
     
-    return hasCostCode || hasDescription;
+    console.log(`🔍 DEBUG: Validation details:`, {
+      hasCostCode,
+      hasDescription,
+      costCode: estimateRow.costCode,
+      description: estimateRow.description?.substring(0, 30)
+    });
+    
+    const isValid = hasCostCode || hasDescription;
+    console.log(`${isValid ? '✅' : '❌'} DEBUG: Estimate row validation result: ${isValid}`);
+    
+    return isValid;
   }
 
   /**
    * Analyze processed entities for insights
    */
   analyzeEstimates(entities) {
+    console.log(`📊 DEBUG: Analyzing ${entities?.length || 0} entities...`);
+
     if (!entities || entities.length === 0) {
+      console.log(`⚠️ DEBUG: No entities to analyze`);
       return {
         totalEntities: 0,
         categories: {},
@@ -338,7 +502,14 @@ ${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit econom
       varianceItems: []
     };
 
-    entities.forEach(entity => {
+    entities.forEach((entity, index) => {
+      console.log(`📋 DEBUG: Analyzing entity ${index + 1}:`, {
+        costCode: entity.costCode,
+        category: entity.category,
+        totalAmount: entity.totalAmount,
+        budgetedAmount: entity.budgetedAmount
+      });
+
       // Category analysis
       analysis.categories[entity.category] = (analysis.categories[entity.category] || 0) + 1;
       
@@ -401,6 +572,16 @@ ${total > 10000 ? 'HIGH VALUE ITEM - ' : ''}${qty > 0 && rate > 0 ? `Unit econom
     // Sort arrays by value
     analysis.highValueItems.sort((a, b) => (b.amount || 0) - (a.amount || 0));
     analysis.varianceItems.sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance));
+
+    console.log(`✅ DEBUG: Analysis complete:`, {
+      totalEntities: analysis.totalEntities,
+      categoriesCount: Object.keys(analysis.categories).length,
+      totalEstimated: analysis.totals.estimated,
+      totalBudgeted: analysis.totals.budgeted,
+      totalVariance: analysis.totals.variance,
+      highValueItemsCount: analysis.highValueItems.length,
+      varianceItemsCount: analysis.varianceItems.length
+    });
 
     return analysis;
   }

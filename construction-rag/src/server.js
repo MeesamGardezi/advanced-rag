@@ -7,9 +7,9 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 
-// Import our services
-import db from './database.js';
-import firebase from './firebase.js';
+// Import our services from config directory (not src)
+import db from '../config/database.js';
+import firebase from '../config/firebase.js';
 import entityProcessor from './entityProcessor.js';
 import embeddingService from './embeddingService.js';
 import ragService from './ragService.js';
@@ -160,59 +160,157 @@ app.post('/api/sync/job', async (req, res) => {
       });
     }
 
-    console.log(`🔄 Syncing estimate data for job ${jobId} from company ${companyId}...`);
+    console.log(`🔄 DEBUG: Starting sync for job ${jobId} from company ${companyId}...`);
 
-    // Step 1: Fetch estimate data from Firebase
+    // Step 1: Fetch estimate data from Firebase with detailed logging
+    console.log(`📡 DEBUG: Fetching job data from Firebase...`);
     const jobData = await firebase.getJobEstimates(companyId, jobId);
     
     if (!jobData) {
+      console.log(`❌ DEBUG: No job data returned from Firebase for job ${jobId}`);
       return res.status(404).json({ 
         error: `Job ${jobId} not found in Firebase` 
       });
     }
 
+    console.log(`✅ DEBUG: Job data fetched successfully:`);
+    console.log(`   - Job ID: ${jobData.jobId}`);
+    console.log(`   - Project Title: ${jobData.projectTitle || jobData.jobTitle}`);
+    console.log(`   - Client: ${jobData.clientName}`);
+    console.log(`   - Raw estimates array length: ${jobData.estimates?.length || 0}`);
+    console.log(`   - Valid estimate count: ${jobData.validEstimateCount || 0}`);
+
     if (!jobData.estimates || jobData.estimates.length === 0) {
+      console.log(`⚠️ DEBUG: No estimates found in job data. Job data structure:`, {
+        hasEstimates: !!jobData.estimates,
+        estimatesType: typeof jobData.estimates,
+        estimatesLength: jobData.estimates?.length,
+        jobDataKeys: Object.keys(jobData)
+      });
+      
       return res.json({
         success: true,
         message: 'No estimate data found for this job',
         project: null,
-        stats: { entities: 0, embeddings: 0, estimates: 0 }
+        stats: { entities: 0, embeddings: 0, estimates: 0 },
+        debug: {
+          jobDataKeys: Object.keys(jobData),
+          hasEstimates: !!jobData.estimates,
+          estimatesLength: jobData.estimates?.length
+        }
       });
     }
 
+    // Debug: Log sample estimates
+    console.log(`📋 DEBUG: Sample estimates (first 2):`);
+    jobData.estimates.slice(0, 2).forEach((estimate, i) => {
+      console.log(`   Estimate ${i + 1}:`, {
+        costCode: estimate.costCode,
+        description: estimate.description?.substring(0, 50) + '...',
+        total: estimate.total,
+        amount: estimate.amount,
+        hasData: !!(estimate.costCode || estimate.description)
+      });
+    });
+
     // Step 2: Create/update project in database
+    console.log(`💾 DEBUG: Creating/updating project in database...`);
     const project = await db.createProject(
       jobId,
-      jobData.jobTitle,
-      jobData.clientName,
+      jobData.jobTitle || jobData.projectTitle || 'Unknown Project',
+      jobData.clientName || 'Unknown Client',
       {
         ...jobData.metadata,
         estimateCount: jobData.estimates.length,
         syncedAt: new Date().toISOString()
       }
     );
+    console.log(`✅ DEBUG: Project created/updated with ID: ${project.id}`);
 
-    // Step 3: Process estimate entities only
+    // Step 3: Process estimate entities with detailed logging
+    console.log(`🔄 DEBUG: Processing estimate entities...`);
+    console.log(`📊 DEBUG: Input data for entityProcessor:`);
+    console.log(`   - jobData.estimates length: ${jobData.estimates.length}`);
+    console.log(`   - jobData structure keys: ${Object.keys(jobData)}`);
+    
     const entities = entityProcessor.processJobEstimates(jobData);
     
+    console.log(`📊 DEBUG: EntityProcessor results:`);
+    console.log(`   - Processed entities count: ${entities.length}`);
+    console.log(`   - Sample entity keys: ${entities.length > 0 ? Object.keys(entities[0]) : 'none'}`);
+    
     if (entities.length === 0) {
+      console.log(`⚠️ DEBUG: EntityProcessor returned 0 entities. Investigating...`);
+      
+      // Debug the processing
+      const validEstimates = jobData.estimates.filter(est => 
+        est && (est.costCode || est.description) && 
+        (est.total !== undefined || est.amount !== undefined)
+      );
+      
+      console.log(`🔍 DEBUG: Validation results:`);
+      console.log(`   - Total estimates: ${jobData.estimates.length}`);
+      console.log(`   - Valid estimates: ${validEstimates.length}`);
+      console.log(`   - Invalid estimates: ${jobData.estimates.length - validEstimates.length}`);
+      
+      // Show first few invalid estimates
+      const invalidEstimates = jobData.estimates.filter(est => 
+        !est || (!est.costCode && !est.description) || 
+        (est.total === undefined && est.amount === undefined)
+      );
+      
+      console.log(`❌ DEBUG: First 3 invalid estimates:`, invalidEstimates.slice(0, 3).map((est, i) => ({
+        index: i,
+        exists: !!est,
+        costCode: est?.costCode,
+        description: est?.description?.substring(0, 30),
+        total: est?.total,
+        amount: est?.amount,
+        hasRequiredData: !!(est?.costCode || est?.description),
+        hasAmount: !!(est?.total !== undefined || est?.amount !== undefined)
+      })));
+
       return res.json({
         success: true,
         message: 'No valid estimate entities to process',
         project,
-        stats: { entities: 0, embeddings: 0, estimates: 0 }
+        stats: { entities: 0, embeddings: 0, estimates: 0 },
+        debug: {
+          totalEstimates: jobData.estimates.length,
+          validEstimates: validEstimates.length,
+          invalidEstimates: invalidEstimates.length,
+          sampleInvalid: invalidEstimates.slice(0, 3)
+        }
       });
     }
 
-    // Step 4: Generate embeddings and store everything
+    // Step 4: Generate embeddings and store everything with detailed logging
+    console.log(`🔮 DEBUG: Processing embeddings for ${entities.length} entities...`);
+    console.log(`📊 DEBUG: Sample entity for embedding:`, {
+      costCode: entities[0]?.costCode,
+      description: entities[0]?.description?.substring(0, 50),
+      category: entities[0]?.category,
+      totalAmount: entities[0]?.totalAmount,
+      hasContent: !!entities[0]?.content,
+      contentLength: entities[0]?.content?.length
+    });
+
     const result = await embeddingService.processEstimateEntities(entities, db);
+    
+    console.log(`✅ DEBUG: Embedding processing completed:`);
+    console.log(`   - Created entities: ${result.entities.length}`);
+    console.log(`   - Created embeddings: ${result.embeddings.length}`);
+    console.log(`   - Total processed: ${result.total}`);
 
     // Step 5: Build relationships between estimate entities
-    console.log('🔗 Building relationships between estimate entities...');
+    console.log('🔗 DEBUG: Building relationships between estimate entities...');
     const relationships = await relationshipBuilder.buildRelationships(result.entities, db);
+    console.log(`✅ DEBUG: Created ${relationships.length} relationships`);
 
     // Step 6: Analyze results
+    console.log(`📈 DEBUG: Analyzing estimate results...`);
     const analysis = entityProcessor.analyzeEstimates(entities);
+    console.log(`✅ DEBUG: Analysis completed - ${analysis.totalEntities} entities analyzed`);
 
     res.json({
       success: true,
@@ -233,11 +331,19 @@ app.post('/api/sync/job', async (req, res) => {
         highValueItems: analysis.highValueItems.length,
         varianceItems: analysis.varianceItems.length
       },
-      processingStats: result.processingStats
+      processingStats: result.processingStats,
+      debug: {
+        rawEstimatesCount: jobData.estimates.length,
+        validEstimatesCount: jobData.validEstimateCount,
+        processedEntitiesCount: entities.length,
+        embeddingSuccessRate: `${result.embeddings.length}/${entities.length}`,
+        relationshipsCreated: relationships.length
+      }
     });
     
   } catch (error) {
-    console.error('❌ Error syncing job estimates:', error.message);
+    console.error('❌ DEBUG: Error in sync process:', error.message);
+    console.error('❌ DEBUG: Error stack:', error.stack);
     res.status(500).json({ 
       error: error.message,
       details: error.stack
