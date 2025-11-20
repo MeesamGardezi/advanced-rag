@@ -1,0 +1,56 @@
+# ==========================================
+# AGENTIC RAG SYSTEM - WORKING REQUIREMENTS
+# Tested and conflict-free
+# ==========================================
+
+# Core Web Framework
+fastapi==0.110.0
+uvicorn[standard]==0.27.0
+python-dotenv==1.0.1
+python-multipart==0.0.9
+
+# Database - PostgreSQL
+psycopg2-binary==2.9.9
+
+# Firebase
+firebase-admin==6.4.0
+
+# LangChain - Use compatible versions
+langchain==0.3.27
+langchain-core==0.3.80
+langchain-community==0.3.31
+langchain-openai==0.3.35
+
+# OpenAI - Required by langchain-openai 0.3.35
+openai>=1.104.2
+
+# Pydantic - Required by langchain
+pydantic>=2.9.0
+pydantic-core>=2.23.0
+pydantic-settings>=2.5.0
+
+# Vector Database
+chromadb==0.4.22
+
+# Data Processing - Compatible with tensorflow
+numpy>=1.26.0,<2.0.0
+pandas>=2.2.0
+
+# Utilities
+httpx==0.27.0
+orjson==3.9.15
+tiktoken>=0.7.0
+tenacity>=9.1.2
+pyyaml>=6.0.2
+watchfiles==0.21.0
+aiofiles==23.2.1
+structlog==24.1.0
+
+# Testing (optional)
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
+
+# Development tools (optional)
+black>=24.1.1
+flake8>=7.0.0
+isort>=5.13.2
