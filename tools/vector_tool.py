@@ -274,89 +274,111 @@ DO NOT use for exact matching - use SQL tool for that.
                 'error': error_msg
             }
     
-    def search_by_text(
-        self,
-        semantic_query: str,
-        data_type: str,
-        job_id: Optional[str] = None,
-        n_results: int = 10,
-        similarity_threshold: Optional[float] = None
-    ) -> Dict[str, Any]:
-        """
-        Search directly in ChromaDB without pre-filtering
-        (Useful when you don't have SQL candidates)
+    # def search_by_text(
+    #     self,
+    #     semantic_query: str,
+    #     data_type: str,
+    #     job_id: Optional[str] = None,
+    #     n_results: int = 10,
+    #     similarity_threshold: Optional[float] = None
+    # ) -> Dict[str, Any]:
+    #     """
+    #     Search directly in ChromaDB without pre-filtering
+    #     (Useful when you don't have SQL candidates)
         
-        Args:
-            semantic_query: Natural language query
-            data_type: Type of data to search
-            job_id: Optional job ID filter
-            n_results: Number of results to return
-            similarity_threshold: Override default threshold
+    #     Args:
+    #         semantic_query: Natural language query
+    #         data_type: Type of data to search
+    #         job_id: Optional job ID filter
+    #         n_results: Number of results to return
+    #         similarity_threshold: Override default threshold
         
-        Returns:
-            Dictionary with search results
-        """
-        logger.info(f"🔍 Vector search: '{semantic_query}' in {data_type}")
+    #     Returns:
+    #         Dictionary with search results
+    #     """
+    #     logger.info(f"🔍 Vector search: '{semantic_query}' in {data_type}")
         
-        try:
-            threshold = similarity_threshold if similarity_threshold is not None else self.similarity_threshold
+    #     try:
+    #         threshold = similarity_threshold if similarity_threshold is not None else self.similarity_threshold
             
-            # Build where filter with proper operator syntax
-            if job_id:
-                where_filter = {
-                    "$and": [
-                        {"data_type": {"$eq": data_type}},
-                        {"job_id": {"$eq": job_id}}
-                    ]
-                }
-            else:
-                where_filter = {"data_type": {"$eq": data_type}}
+    #         # Build where filter with proper operator syntax
+    #         if job_id:
+    #             where_filter = {
+    #                 "$and": [
+    #                     {"data_type": {"$eq": data_type}},
+    #                     {"job_id": {"$eq": job_id}}
+    #                 ]
+    #             }
+    #         else:
+    #             where_filter = {"data_type": {"$eq": data_type}}
             
-            # Query ChromaDB
-            results = self.collection.query(
-                query_texts=[semantic_query],
-                n_results=n_results,
-                where=where_filter,
-                include=['metadatas', 'distances', 'documents']
-            )
+    #         # Query ChromaDB
+    #         results = self.collection.query(
+    #             query_texts=[semantic_query],
+    #             n_results=n_results,
+    #             where=where_filter,
+    #             include=['metadatas', 'distances', 'documents']
+    #         )
             
-            # Extract and format results
-            ids = results['ids'][0] if results['ids'] else []
-            distances = results['distances'][0] if results['distances'] else []
-            metadatas = results['metadatas'][0] if results['metadatas'] else []
-            documents = results['documents'][0] if results['documents'] else []
+    #         # Extract and format results
+    #         ids = results['ids'][0] if results['ids'] else []
+    #         distances = results['distances'][0] if results['distances'] else []
+    #         metadatas = results['metadatas'][0] if results['metadatas'] else []
+    #         documents = results['documents'][0] if results['documents'] else []
             
-            # Filter by threshold and format
-            matching_results = []
+    #         # Filter by threshold and format
+    #         matching_results = []
             
-            for doc_id, distance, metadata, document in zip(ids, distances, metadatas, documents):
-                similarity = 1.0 - distance
+    #         for doc_id, distance, metadata, document in zip(ids, distances, metadatas, documents):
+    #             similarity = 1.0 - distance
                 
-                if similarity >= threshold:
-                    matching_results.append({
-                        'id': doc_id,
-                        'similarity': similarity,
-                        'metadata': metadata,
-                        'text_preview': document[:200] + "..." if len(document) > 200 else document
-                    })
+    #             if similarity >= threshold:
+    #                 matching_results.append({
+    #                     'id': doc_id,
+    #                     'similarity': similarity,
+    #                     'metadata': metadata,
+    #                     'text_preview': document[:200] + "..." if len(document) > 200 else document
+    #                 })
             
-            logger.info(f"✅ Found {len(matching_results)} matches above threshold {threshold}")
+    #         logger.info(f"✅ Found {len(matching_results)} matches above threshold {threshold}")
             
-            return {
-                'success': True,
-                'results': matching_results,
-                'total_found': len(matching_results)
-            }
+    #         return {
+    #             'success': True,
+    #             'results': matching_results,
+    #             'total_found': len(matching_results)
+    #         }
         
-        except Exception as e:
-            error_msg = f"Vector search error: {str(e)}"
-            logger.error(f"❌ {error_msg}")
-            return {
-                'success': False,
-                'results': [],
-                'total_found': 0,
-                'error': error_msg
-            }
+    #     except Exception as e:
+    #         error_msg = f"Vector search error: {str(e)}"
+    #         logger.error(f"❌ {error_msg}")
+    #         return {
+    #             'success': False,
+    #             'results': [],
+    #             'total_found': 0,
+    #             'error': error_msg
+    #         }
+
+    def search_by_text(
+    self,
+    semantic_query: str,
+    data_type: str = "estimate",  # Default to estimate
+    job_id: Optional[str] = None,
+    n_results: int = 100,  # Increase default
+    similarity_threshold: Optional[float] = 0.5  # Lower threshold
+    ) -> Dict[str, Any]:
+        """Direct search without SQL candidates"""
+        
+        # Simplified where filter - check if this is the issue
+        where_filter = {}
+        if job_id:
+            where_filter["job_id"] = job_id
+        if data_type:
+            where_filter["data_type"] = data_type
+    
+        # If no filters work, try without where clause
+        if not where_filter:
+            where_filter = None
+            
     
     def get_similar_items(
         self,

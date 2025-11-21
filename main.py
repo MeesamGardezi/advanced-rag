@@ -576,6 +576,137 @@ async def general_exception_handler(request, exc):
         "status_code": 500
     }
 
+# Add this after the /stats endpoints and before the /jobs endpoint
+
+@app.get("/debug/chromadb")
+async def debug_chromadb():
+    """
+    Debug endpoint to check ChromaDB contents and test searches
+    
+    This helps diagnose why semantic search isn't finding matches
+    """
+    try:
+        from tools.vector_tool import vector_tool
+        from database import get_chroma_collection
+        
+        # Get collection info
+        collection_info = vector_tool.debug_collection_info()
+        
+        # Test search for roofing with various thresholds
+        roofing_tests = {}
+        for threshold in [0.3, 0.4, 0.5, 0.6, 0.7]:
+            result = vector_tool.search_by_text(
+                semantic_query="roofing roof shingles",
+                data_type="estimate",
+                n_results=10,
+                similarity_threshold=threshold
+            )
+            roofing_tests[f"threshold_{threshold}"] = {
+                'found': result['total_found'],
+                'success': result['success']
+            }
+        
+        # Test with specific job_id
+        job_specific = vector_tool.search_by_text(
+            semantic_query="roofing",
+            data_type="estimate",
+            job_id="4ZppggAAJuJMZNB8f2ZT",
+            n_results=100,
+            similarity_threshold=0.3
+        )
+        
+        # Get a sample of ALL documents for the job
+        collection = get_chroma_collection()
+        job_docs = collection.get(
+            where={"job_id": "4ZppggAAJuJMZNB8f2ZT"},
+            limit=10,
+            include=['metadatas', 'documents']
+        )
+        
+        return {
+            "collection_info": collection_info,
+            "roofing_search_tests": roofing_tests,
+            "job_specific_search": {
+                "found": job_specific['total_found'],
+                "results": job_specific.get('results', [])[:3] if job_specific['success'] else []
+            },
+            "job_documents_sample": {
+                "count": len(job_docs['ids']) if job_docs['ids'] else 0,
+                "sample": job_docs['documents'][:3] if job_docs.get('documents') else []
+            },
+            "cache_stats": vector_tool.get_cache_stats()
+        }
+    except Exception as e:
+        logger.error(f"Debug endpoint error: {e}")
+        import traceback
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+
+
+@app.post("/debug/test-semantic")
+async def test_semantic_search(
+    query: str = Query(..., description="Semantic search query"),
+    threshold: float = Query(0.5, description="Similarity threshold"),
+    job_id: Optional[str] = Query(None, description="Optional job ID filter")
+):
+    """
+    Test semantic search directly with custom parameters
+    """
+    try:
+        from tools.vector_tool import vector_tool
+        
+        result = vector_tool.search_by_text(
+            semantic_query=query,
+            data_type="estimate",
+            job_id=job_id,
+            n_results=20,
+            similarity_threshold=threshold
+        )
+        
+        return {
+            "query": query,
+            "threshold": threshold,
+            "job_id": job_id,
+            "success": result['success'],
+            "total_found": result['total_found'],
+            "results": result.get('results', [])[:10]  # First 10 results
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    
+
+@app.get("/debug/test-simple")
+async def test_simple():
+    """Simple test to see what's in ChromaDB"""
+    try:
+        from database import get_chroma_collection
+        collection = get_chroma_collection()
+        
+        # Just get ANY documents
+        sample = collection.query(
+            query_texts=["roofing"],
+            n_results=5,
+            include=['distances', 'documents']
+        )
+        
+        results = []
+        if sample['ids'] and sample['ids'][0]:
+            for i in range(len(sample['ids'][0])):
+                results.append({
+                    'id': sample['ids'][0][i],
+                    'distance': sample['distances'][0][i],
+                    'similarity': 1.0 - sample['distances'][0][i],
+                    'text_preview': sample['documents'][0][i][:100] if sample['documents'][0] else ""
+                })
+        
+        return {
+            "query": "roofing",
+            "results": results
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 # ==========================================
 # MAIN
