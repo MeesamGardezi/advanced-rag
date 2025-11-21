@@ -1,7 +1,7 @@
 """
-ETL Migration Script: Firestore → PostgreSQL
-Migrates a single job's data with transaction support and verification
-FIXED: Uses raw SQL with psycopg2 instead of SQLAlchemy ORM
+ETL Migration Script: Firestore → PostgreSQL + ChromaDB
+Migrates a single job's data with embeddings to BOTH databases
+UPDATED: Now populates ChromaDB with vector embeddings
 """
 
 import argparse
@@ -15,7 +15,9 @@ from database import (
     initialize_firebase,
     fetch_job_complete_data,
     extract_estimate_data,
-    extract_flooring_estimate_data
+    extract_flooring_estimate_data,
+    extract_schedule_data,
+    get_chroma_collection
 )
 from embedding_service import EmbeddingService
 
@@ -31,17 +33,27 @@ logger = logging.getLogger(__name__)
 
 
 class ETLMigration:
-    """Handles ETL migration from Firestore to PostgreSQL using raw SQL"""
+    """Handles ETL migration from Firestore to PostgreSQL + ChromaDB using raw SQL"""
     
     def __init__(self):
         self.embedding_service = EmbeddingService()
+        self.chroma_collection = None
         self.stats = {
             'job_migrated': False,
             'estimates_migrated': 0,
             'flooring_estimates_migrated': 0,
+            'schedule_items_migrated': 0,
             'consumed_items_migrated': 0,
+            'vector_embeddings_created': 0,
             'errors': []
         }
+    
+    def _initialize_chroma(self):
+        """Initialize ChromaDB collection"""
+        if self.chroma_collection is None:
+            logger.info("🔮 Initializing ChromaDB...")
+            self.chroma_collection = get_chroma_collection()
+            logger.info(f"✅ ChromaDB ready (current size: {self.chroma_collection.count()})")
     
     def _parse_datetime(self, date_value) -> Optional[datetime]:
         """Parse various date formats from Firestore"""
@@ -105,8 +117,14 @@ class ETLMigration:
         cursor.execute(sql, values)
         return True
     
-    def _insert_estimate(self, cursor, row_data: Dict[str, Any], job_id: str) -> bool:
-        """Insert estimate row using raw SQL"""
+    def _insert_estimate_with_embedding(
+        self, 
+        cursor, 
+        row_data: Dict[str, Any], 
+        job_id: str,
+        job_context: Dict[str, Any]
+    ) -> bool:
+        """Insert estimate row into PostgreSQL AND ChromaDB"""
         row_num = row_data.get('row_number', 0)
         
         # Parse numerical values
@@ -125,6 +143,7 @@ class ETLMigration:
         
         estimate_id = f"{job_id}_est_row_{row_num}"
         
+        # 1. Insert into PostgreSQL
         sql = """
             INSERT INTO estimates (
                 id, job_id, row_number, area, task_scope, cost_code, row_type,
@@ -134,7 +153,6 @@ class ETLMigration:
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
-        # Convert materials to JSON string if needed
         import json
         materials_json = json.dumps(materials) if materials else None
         
@@ -159,10 +177,48 @@ class ETLMigration:
         )
         
         cursor.execute(sql, values)
+        
+        # 2. Create embedding and insert into ChromaDB
+        try:
+            # Create text representation
+            text_representation = self.embedding_service.create_estimate_row_text(
+                row_data,
+                job_context
+            )
+            
+            # Generate embedding
+            embedding = self.embedding_service.generate_embedding(text_representation)
+            
+            # Create metadata
+            metadata = self.embedding_service.create_estimate_row_metadata(
+                row_data,
+                job_context
+            )
+            
+            # Insert into ChromaDB
+            self.chroma_collection.add(
+                ids=[estimate_id],
+                embeddings=[embedding],
+                documents=[text_representation],
+                metadatas=[metadata]
+            )
+            
+            self.stats['vector_embeddings_created'] += 1
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to create embedding for {estimate_id}: {e}")
+            # Don't fail the whole migration for embedding errors
+        
         return True
     
-    def _insert_flooring_estimate(self, cursor, row_data: Dict[str, Any], job_id: str) -> bool:
-        """Insert flooring estimate row using raw SQL"""
+    def _insert_flooring_estimate_with_embedding(
+        self, 
+        cursor, 
+        row_data: Dict[str, Any], 
+        job_id: str,
+        job_context: Dict[str, Any]
+    ) -> bool:
+        """Insert flooring estimate row into PostgreSQL AND ChromaDB"""
         row_num = row_data.get('row_number', 0)
         
         measured_qty = float(row_data.get('measuredQty', 0))
@@ -180,6 +236,7 @@ class ETLMigration:
         
         flooring_id = f"{job_id}_flooring_row_{row_num}"
         
+        # 1. Insert into PostgreSQL
         sql = """
             INSERT INTO flooring_estimates (
                 id, job_id, row_number, floor_type_id, vendor, item_material_name,
@@ -206,10 +263,122 @@ class ETLMigration:
         )
         
         cursor.execute(sql, values)
+        
+        # 2. Create embedding and insert into ChromaDB
+        try:
+            text_representation = self.embedding_service.create_flooring_estimate_row_text(
+                row_data,
+                job_context
+            )
+            
+            embedding = self.embedding_service.generate_embedding(text_representation)
+            
+            metadata = self.embedding_service.create_flooring_estimate_row_metadata(
+                row_data,
+                job_context
+            )
+            
+            self.chroma_collection.add(
+                ids=[flooring_id],
+                embeddings=[embedding],
+                documents=[text_representation],
+                metadatas=[metadata]
+            )
+            
+            self.stats['vector_embeddings_created'] += 1
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to create embedding for {flooring_id}: {e}")
+        
+        return True
+    
+    def _insert_schedule_item_with_embedding(
+        self,
+        cursor,
+        row_data: Dict[str, Any],
+        job_id: str,
+        job_context: Dict[str, Any]
+    ) -> bool:
+        """Insert schedule item into PostgreSQL AND ChromaDB"""
+        row_num = row_data.get('row_number', 0)
+        
+        schedule_id = f"{job_id}_schedule_row_{row_num}"
+        
+        # Parse values
+        hours = float(row_data.get('hours', 0))
+        consumed = float(row_data.get('consumed', 0))
+        percentage_complete = float(row_data.get('percentageComplete', 0))
+        
+        # 1. Insert into PostgreSQL
+        sql = """
+            INSERT INTO schedule_items (
+                id, job_id, row_number, task, is_main_task, task_type,
+                hours, consumed, percentage_complete, start_date, end_date,
+                resources, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        import json
+        resources_json = json.dumps(row_data.get('resources', {}))
+        
+        values = (
+            schedule_id,
+            job_id,
+            row_num,
+            row_data.get('task', ''),
+            row_data.get('isMainTask', False),
+            row_data.get('taskType', 'labour'),
+            hours, consumed, percentage_complete,
+            self._parse_datetime(row_data.get('startDate')),
+            self._parse_datetime(row_data.get('endDate')),
+            resources_json,
+            datetime.now(timezone.utc)
+        )
+        
+        cursor.execute(sql, values)
+        
+        # 2. Create embedding and insert into ChromaDB
+        try:
+            # Create text representation for schedule
+            text_representation = f"""SCHEDULE ITEM #{row_num}
+Job: {job_context.get('job_name', 'Unknown')}
+Task: {row_data.get('task', '')}
+Type: {row_data.get('taskType', 'labour')}
+Hours: {hours}
+Consumed: {consumed}
+Progress: {percentage_complete}%"""
+            
+            embedding = self.embedding_service.generate_embedding(text_representation)
+            
+            metadata = {
+                'job_name': str(job_context.get('job_name', 'Unknown')),
+                'company_id': str(job_context.get('company_id', '')),
+                'job_id': str(job_id),
+                'row_number': int(row_num),
+                'document_type': 'schedule_row',
+                'data_type': 'schedule',
+                'granularity': 'row',
+                'task': str(row_data.get('task', ''))[:200],
+                'hours': float(hours),
+                'consumed': float(consumed)
+            }
+            
+            self.chroma_collection.add(
+                ids=[schedule_id],
+                embeddings=[embedding],
+                documents=[text_representation],
+                metadatas=[metadata]
+            )
+            
+            self.stats['vector_embeddings_created'] += 1
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to create embedding for {schedule_id}: {e}")
+        
         return True
     
     def _insert_consumed_item(self, cursor, item_data: Dict[str, Any], job_id: str, index: int) -> bool:
-        """Insert consumed item using raw SQL"""
+        """Insert consumed item using raw SQL (no embedding needed for consumed)"""
         cost_code = item_data.get('costCode', 'Unknown')
         amount_str = item_data.get('amount', '0')
         
@@ -243,7 +412,7 @@ class ETLMigration:
     
     async def migrate_job(self, company_id: str, job_id: str, skip_if_exists: bool = True) -> Dict[str, Any]:
         """
-        Migrate a single job from Firestore to PostgreSQL
+        Migrate a single job from Firestore to PostgreSQL + ChromaDB
         
         Args:
             company_id: Company identifier
@@ -260,6 +429,9 @@ class ETLMigration:
         start_time = datetime.now()
         
         try:
+            # Initialize ChromaDB
+            self._initialize_chroma()
+            
             # Check if job already exists
             if skip_if_exists and verify_job_exists(job_id):
                 logger.warning(f"⚠️  Job {job_id} already exists in PostgreSQL. Skipping migration.")
@@ -286,6 +458,15 @@ class ETLMigration:
             
             logger.info(f"✅ Job data fetched: {job_data.get('projectTitle', 'Unknown')}")
             
+            # Create job context for embeddings
+            job_context = {
+                'job_name': job_data.get('projectTitle', 'Unknown Job'),
+                'company_id': company_id,
+                'job_id': job_id,
+                'client_name': job_data.get('clientName', ''),
+                'site_location': f"{job_data.get('siteCity', '')}, {job_data.get('siteState', '')}".strip(', ')
+            }
+            
             # Step 2: Transform and migrate within a transaction
             with session_scope() as cursor:
                 logger.info("🔄 Starting database transaction...")
@@ -296,31 +477,47 @@ class ETLMigration:
                 self.stats['job_migrated'] = True
                 logger.info(f"✅ Job metadata: {job_data.get('projectTitle', 'Unknown')}")
                 
-                # 2.2: Migrate Estimate data
+                # 2.2: Migrate Estimate data WITH EMBEDDINGS
                 estimate_data = extract_estimate_data(job_data)
                 if estimate_data:
                     logger.info(f"📝 Migrating estimate data ({estimate_data['total_rows']} rows)...")
                     entries = estimate_data.get('entries', [])
                     
                     for entry in entries:
-                        self._insert_estimate(cursor, entry, job_id)
+                        self._insert_estimate_with_embedding(cursor, entry, job_id, job_context)
                         self.stats['estimates_migrated'] += 1
+                        
+                        # Log progress every 50 rows
+                        if self.stats['estimates_migrated'] % 50 == 0:
+                            logger.info(f"   Progress: {self.stats['estimates_migrated']}/{len(entries)} estimates...")
                     
-                    logger.info(f"✅ Estimates: {self.stats['estimates_migrated']} rows")
+                    logger.info(f"✅ Estimates: {self.stats['estimates_migrated']} rows + embeddings")
                 
-                # 2.3: Migrate Flooring Estimate data
+                # 2.3: Migrate Flooring Estimate data WITH EMBEDDINGS
                 flooring_data = extract_flooring_estimate_data(job_data)
                 if flooring_data:
                     logger.info(f"📝 Migrating flooring estimate data ({flooring_data['total_rows']} rows)...")
                     entries = flooring_data.get('entries', [])
                     
                     for entry in entries:
-                        self._insert_flooring_estimate(cursor, entry, job_id)
+                        self._insert_flooring_estimate_with_embedding(cursor, entry, job_id, job_context)
                         self.stats['flooring_estimates_migrated'] += 1
                     
-                    logger.info(f"✅ Flooring estimates: {self.stats['flooring_estimates_migrated']} rows")
+                    logger.info(f"✅ Flooring estimates: {self.stats['flooring_estimates_migrated']} rows + embeddings")
                 
-                # 2.4: Migrate Consumed data
+                # 2.4: Migrate Schedule data WITH EMBEDDINGS
+                schedule_data = extract_schedule_data(job_data)
+                if schedule_data:
+                    logger.info(f"📝 Migrating schedule data ({schedule_data['total_rows']} rows)...")
+                    entries = schedule_data.get('entries', [])
+                    
+                    for entry in entries:
+                        self._insert_schedule_item_with_embedding(cursor, entry, job_id, job_context)
+                        self.stats['schedule_items_migrated'] += 1
+                    
+                    logger.info(f"✅ Schedule items: {self.stats['schedule_items_migrated']} rows + embeddings")
+                
+                # 2.5: Migrate Consumed data (no embeddings needed)
                 consumed_data = job_data.get('consumed_data')
                 if consumed_data:
                     entries = consumed_data.get('entries', [])
@@ -340,18 +537,32 @@ class ETLMigration:
             logger.info("🔍 Verifying migration...")
             summary = get_job_data_summary(job_id)
             
+            # Check PostgreSQL counts
             verification = {
                 'estimates': summary['estimates_count'] == self.stats['estimates_migrated'],
                 'flooring': summary['flooring_estimates_count'] == self.stats['flooring_estimates_migrated'],
                 'consumed': summary['consumed_items_count'] == self.stats['consumed_items_migrated']
             }
             
+            # Check ChromaDB count
+            chroma_count = self.chroma_collection.count()
+            expected_vectors = (
+                self.stats['estimates_migrated'] + 
+                self.stats['flooring_estimates_migrated'] + 
+                self.stats['schedule_items_migrated']
+            )
+            
+            logger.info(f"📊 ChromaDB verification:")
+            logger.info(f"   Expected vectors: {expected_vectors}")
+            logger.info(f"   Actual vectors: {chroma_count}")
+            logger.info(f"   Created this run: {self.stats['vector_embeddings_created']}")
+            
             all_verified = all(verification.values())
             
             if all_verified:
-                logger.info("✅ Verification successful - all counts match!")
+                logger.info("✅ PostgreSQL verification successful - all counts match!")
             else:
-                logger.warning("⚠️  Verification issues detected:")
+                logger.warning("⚠️  PostgreSQL verification issues detected:")
                 for data_type, passed in verification.items():
                     if not passed:
                         logger.warning(f"   ❌ {data_type} count mismatch")
@@ -364,9 +575,11 @@ class ETLMigration:
             logger.info(f"{'='*80}")
             logger.info(f"📊 Summary:")
             logger.info(f"   Job: {job_data.get('projectTitle', 'Unknown')}")
-            logger.info(f"   Estimates: {self.stats['estimates_migrated']}")
-            logger.info(f"   Flooring Estimates: {self.stats['flooring_estimates_migrated']}")
-            logger.info(f"   Consumed Items: {self.stats['consumed_items_migrated']}")
+            logger.info(f"   Estimates: {self.stats['estimates_migrated']} (PostgreSQL + ChromaDB)")
+            logger.info(f"   Flooring Estimates: {self.stats['flooring_estimates_migrated']} (PostgreSQL + ChromaDB)")
+            logger.info(f"   Schedule Items: {self.stats['schedule_items_migrated']} (PostgreSQL + ChromaDB)")
+            logger.info(f"   Consumed Items: {self.stats['consumed_items_migrated']} (PostgreSQL only)")
+            logger.info(f"   Total Embeddings: {self.stats['vector_embeddings_created']}")
             logger.info(f"{'='*80}")
             
             return {
@@ -375,7 +588,8 @@ class ETLMigration:
                 'stats': self.stats,
                 'verification': verification,
                 'duration_seconds': duration,
-                'job_summary': summary
+                'job_summary': summary,
+                'chroma_count': chroma_count
             }
             
         except Exception as e:
@@ -396,7 +610,7 @@ class ETLMigration:
 async def main():
     """Main ETL migration script"""
     parser = argparse.ArgumentParser(
-        description='Migrate a single job from Firestore to PostgreSQL'
+        description='Migrate a single job from Firestore to PostgreSQL + ChromaDB'
     )
     parser.add_argument(
         '--company-id',
