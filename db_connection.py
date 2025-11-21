@@ -152,10 +152,6 @@ def get_job_data_summary(job_id: str) -> Dict[str, Any]:
         cursor.execute("SELECT COUNT(*) as count FROM flooring_estimates WHERE job_id = %s", (job_id,))
         flooring_count = cursor.fetchone()['count']
         
-        # Count schedule items
-        cursor.execute("SELECT COUNT(*) as count FROM schedule_items WHERE job_id = %s", (job_id,))
-        schedule_count = cursor.fetchone()['count']
-        
         # Count consumed items
         cursor.execute("SELECT COUNT(*) as count FROM consumed_items WHERE job_id = %s", (job_id,))
         consumed_count = cursor.fetchone()['count']
@@ -167,7 +163,6 @@ def get_job_data_summary(job_id: str) -> Dict[str, Any]:
             "client_name": job['client_name'],
             "estimates_count": estimates_count,
             "flooring_estimates_count": flooring_count,
-            "schedule_items_count": schedule_count,
             "consumed_items_count": consumed_count
         }
 
@@ -258,26 +253,6 @@ def init_database():
     CREATE INDEX IF NOT EXISTS idx_flooring_job_id ON flooring_estimates(job_id);
     CREATE INDEX IF NOT EXISTS idx_flooring_vendor ON flooring_estimates(vendor);
     
-    -- Schedule Items table
-    CREATE TABLE IF NOT EXISTS schedule_items (
-        id VARCHAR(255) PRIMARY KEY,
-        job_id VARCHAR(255) NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-        row_number INTEGER NOT NULL,
-        task TEXT NOT NULL,
-        is_main_task BOOLEAN DEFAULT FALSE,
-        task_type VARCHAR(100) DEFAULT 'labour',
-        hours NUMERIC DEFAULT 0,
-        consumed NUMERIC DEFAULT 0,
-        percentage_complete NUMERIC DEFAULT 0,
-        start_date TIMESTAMP,
-        end_date TIMESTAMP,
-        resources JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    
-    CREATE INDEX IF NOT EXISTS idx_schedule_job_id ON schedule_items(job_id);
-    CREATE INDEX IF NOT EXISTS idx_schedule_main_task ON schedule_items(is_main_task);
-    
     -- Consumed Items table
     CREATE TABLE IF NOT EXISTS consumed_items (
         id VARCHAR(255) PRIMARY KEY,
@@ -299,6 +274,57 @@ def init_database():
     
     logger.info("✅ Database tables created")
     return db
+
+
+def close_database():
+    """Close database connection pool"""
+    global _db_instance
+    
+    if _db_instance and _db_instance._pool:
+        try:
+            _db_instance._pool.closeall()
+            logger.info("✅ Database connection pool closed")
+        except Exception as e:
+            logger.error(f"❌ Error closing database pool: {e}")
+    
+    _db_instance = None
+
+
+def health_check() -> Dict[str, Any]:
+    """Perform database health check"""
+    try:
+        db = get_db()
+        
+        # Test connection
+        with db.get_cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        
+        # Get table counts
+        counts = {}
+        tables = ['jobs', 'estimates', 'flooring_estimates', 'consumed_items']
+        
+        with db.get_cursor() as cursor:
+            for table in tables:
+                try:
+                    cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
+                    result = cursor.fetchone()
+                    counts[table] = result['count'] if result else 0
+                except Exception:
+                    counts[table] = 0
+        
+        return {
+            'status': 'healthy',
+            'connection': 'active',
+            'table_counts': counts
+        }
+    
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            'status': 'unhealthy',
+            'error': str(e)
+        }
 
 
 if __name__ == "__main__":

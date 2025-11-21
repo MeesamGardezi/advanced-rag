@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import re
 import logging
 
-from db_connection import session_scope, execute_raw_sql
+from db_connection import session_scope
 
 logger = logging.getLogger(__name__)
 

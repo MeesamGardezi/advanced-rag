@@ -1,11 +1,12 @@
 """
 ETL Migration Script: Firestore → PostgreSQL
 Migrates a single job's data with transaction support and verification
+FIXED: Uses raw SQL with psycopg2 instead of SQLAlchemy ORM
 """
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 import logging
 
@@ -14,16 +15,12 @@ from database import (
     initialize_firebase,
     fetch_job_complete_data,
     extract_estimate_data,
-    extract_flooring_estimate_data,
-    extract_schedule_data
+    extract_flooring_estimate_data
 )
 from embedding_service import EmbeddingService
 
 # Import PostgreSQL components
 from db_connection import get_db, session_scope, get_job_data_summary, verify_job_exists
-from database_schema import (
-    Job, Estimate, FlooringEstimate, ScheduleItem, ConsumedItem
-)
 
 # Setup logging
 logging.basicConfig(
@@ -34,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class ETLMigration:
-    """Handles ETL migration from Firestore to PostgreSQL"""
+    """Handles ETL migration from Firestore to PostgreSQL using raw SQL"""
     
     def __init__(self):
         self.embedding_service = EmbeddingService()
@@ -42,7 +39,6 @@ class ETLMigration:
             'job_migrated': False,
             'estimates_migrated': 0,
             'flooring_estimates_migrated': 0,
-            'schedule_items_migrated': 0,
             'consumed_items_migrated': 0,
             'errors': []
         }
@@ -63,7 +59,6 @@ class ETLMigration:
             
             # Handle string dates
             if isinstance(date_value, str):
-                # Try common formats
                 for fmt in ['%Y-%m-%d', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S']:
                     try:
                         return datetime.strptime(date_value, fmt)
@@ -74,34 +69,44 @@ class ETLMigration:
         
         return None
     
-    def _transform_job(self, job_data: Dict[str, Any]) -> Job:
-        """Transform Firestore job data to Job model"""
+    def _insert_job(self, cursor, job_data: Dict[str, Any]) -> bool:
+        """Insert job using raw SQL"""
         job_id = job_data['job_id']
         company_id = job_data['company_id']
         
-        # Compute site_location
         city = job_data.get('siteCity', '')
         state = job_data.get('siteState', '')
         site_location = f"{city}, {state}".strip(', ')
         
-        return Job(
-            id=job_id,
-            company_id=company_id,
-            name=job_data.get('projectTitle', 'Unknown Job'),
-            client_name=job_data.get('clientName', ''),
-            site_city=city,
-            site_state=state,
-            site_location=site_location,
-            project_description=job_data.get('projectDescription', ''),
-            status=job_data.get('status', 'active'),
-            estimate_type=job_data.get('estimateType', 'general'),
-            created_date=self._parse_datetime(job_data.get('createdDate')),
-            last_updated=datetime.utcnow(),
-            schedule_last_updated=self._parse_datetime(job_data.get('scheduleLastUpdated'))
+        sql = """
+            INSERT INTO jobs (
+                id, company_id, name, client_name, site_city, site_state,
+                site_location, project_description, status, estimate_type,
+                created_date, last_updated, schedule_last_updated
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        values = (
+            job_id,
+            company_id,
+            job_data.get('projectTitle', 'Unknown Job'),
+            job_data.get('clientName', ''),
+            city,
+            state,
+            site_location,
+            job_data.get('projectDescription', ''),
+            job_data.get('status', 'active'),
+            job_data.get('estimateType', 'general'),
+            self._parse_datetime(job_data.get('createdDate')),
+            datetime.now(timezone.utc),
+            self._parse_datetime(job_data.get('scheduleLastUpdated'))
         )
+        
+        cursor.execute(sql, values)
+        return True
     
-    def _transform_estimate_row(self, row_data: Dict[str, Any], job_id: str) -> Estimate:
-        """Transform Firestore estimate row to Estimate model"""
+    def _insert_estimate(self, cursor, row_data: Dict[str, Any], job_id: str) -> bool:
+        """Insert estimate row using raw SQL"""
         row_num = row_data.get('row_number', 0)
         
         # Parse numerical values
@@ -111,46 +116,55 @@ class ETLMigration:
         budgeted_rate = float(row_data.get('budgetedRate', 0))
         budgeted_total = float(row_data.get('budgetedTotal', 0))
         
-        # Calculate variance
         variance = total - budgeted_total
         variance_pct = (variance / budgeted_total * 100) if budgeted_total != 0 else 0
         
-        # Handle materials
         materials = row_data.get('materials', [])
         has_materials = len(materials) > 0
         material_count = len(materials)
         
-        # Generate unique ID
         estimate_id = f"{job_id}_est_row_{row_num}"
         
-        return Estimate(
-            id=estimate_id,
-            job_id=job_id,
-            row_number=row_num,
-            area=row_data.get('area', ''),
-            task_scope=row_data.get('taskScope', ''),
-            cost_code=row_data.get('costCode', ''),
-            row_type=row_data.get('rowType', 'estimate'),
-            description=row_data.get('description', ''),
-            notes_remarks=row_data.get('notesRemarks', ''),
-            units=row_data.get('units', ''),
-            qty=qty,
-            rate=rate,
-            total=total,
-            budgeted_rate=budgeted_rate,
-            budgeted_total=budgeted_total,
-            variance=variance,
-            variance_pct=variance_pct,
-            materials=materials if materials else None,
-            has_materials=has_materials,
-            material_count=material_count
+        sql = """
+            INSERT INTO estimates (
+                id, job_id, row_number, area, task_scope, cost_code, row_type,
+                description, notes_remarks, units, qty, rate, total,
+                budgeted_rate, budgeted_total, variance, variance_pct,
+                materials, has_materials, material_count, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        # Convert materials to JSON string if needed
+        import json
+        materials_json = json.dumps(materials) if materials else None
+        
+        values = (
+            estimate_id,
+            job_id,
+            row_num,
+            row_data.get('area', ''),
+            row_data.get('taskScope', ''),
+            row_data.get('costCode', ''),
+            row_data.get('rowType', 'estimate'),
+            row_data.get('description', ''),
+            row_data.get('notesRemarks', ''),
+            row_data.get('units', ''),
+            qty, rate, total,
+            budgeted_rate, budgeted_total,
+            variance, variance_pct,
+            materials_json,
+            has_materials,
+            material_count,
+            datetime.now(timezone.utc)
         )
+        
+        cursor.execute(sql, values)
+        return True
     
-    def _transform_flooring_estimate_row(self, row_data: Dict[str, Any], job_id: str) -> FlooringEstimate:
-        """Transform Firestore flooring estimate row to FlooringEstimate model"""
+    def _insert_flooring_estimate(self, cursor, row_data: Dict[str, Any], job_id: str) -> bool:
+        """Insert flooring estimate row using raw SQL"""
         row_num = row_data.get('row_number', 0)
         
-        # Parse numerical values
         measured_qty = float(row_data.get('measuredQty', 0))
         supplier_qty = float(row_data.get('supplierQty', 0))
         waste_factor = float(row_data.get('wasteFactor', 0))
@@ -161,95 +175,71 @@ class ETLMigration:
         total_cost = float(row_data.get('totalCost', 0))
         sale_price = float(row_data.get('salePrice', 0))
         
-        # Calculate profit
         profit = sale_price - total_cost
         margin_pct = (profit / sale_price * 100) if sale_price > 0 else 0
         
-        # Generate unique ID
         flooring_id = f"{job_id}_flooring_row_{row_num}"
         
-        return FlooringEstimate(
-            id=flooring_id,
-            job_id=job_id,
-            row_number=row_num,
-            floor_type_id=row_data.get('floorTypeId', ''),
-            vendor=row_data.get('vendor', ''),
-            item_material_name=row_data.get('itemMaterialName', ''),
-            brand=row_data.get('brand', ''),
-            unit=row_data.get('unit', ''),
-            measured_qty=measured_qty,
-            supplier_qty=supplier_qty,
-            waste_factor=waste_factor,
-            qty_including_waste=qty_including_waste,
-            unit_price=unit_price,
-            cost_price=cost_price,
-            tax_freight=tax_freight,
-            total_cost=total_cost,
-            sale_price=sale_price,
-            profit=profit,
-            margin_pct=margin_pct,
-            notes_remarks=row_data.get('notesRemarks', '')
+        sql = """
+            INSERT INTO flooring_estimates (
+                id, job_id, row_number, floor_type_id, vendor, item_material_name,
+                brand, unit, measured_qty, supplier_qty, waste_factor,
+                qty_including_waste, unit_price, cost_price, tax_freight,
+                total_cost, sale_price, profit, margin_pct, notes_remarks, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        values = (
+            flooring_id,
+            job_id,
+            row_num,
+            row_data.get('floorTypeId', ''),
+            row_data.get('vendor', ''),
+            row_data.get('itemMaterialName', ''),
+            row_data.get('brand', ''),
+            row_data.get('unit', ''),
+            measured_qty, supplier_qty, waste_factor,
+            qty_including_waste, unit_price, cost_price, tax_freight,
+            total_cost, sale_price, profit, margin_pct,
+            row_data.get('notesRemarks', ''),
+            datetime.now(timezone.utc)
         )
+        
+        cursor.execute(sql, values)
+        return True
     
-    def _transform_schedule_item(self, item_data: Dict[str, Any], job_id: str) -> ScheduleItem:
-        """Transform Firestore schedule item to ScheduleItem model"""
-        row_num = item_data.get('row_number', 0)
-        
-        # Parse numerical values
-        hours = float(item_data.get('hours', 0))
-        consumed = float(item_data.get('consumed', 0))
-        percentage_complete = float(item_data.get('percentageComplete', 0))
-        
-        # Parse dates
-        start_date = self._parse_datetime(item_data.get('startDate'))
-        end_date = self._parse_datetime(item_data.get('endDate'))
-        
-        # Handle resources (JSON)
-        resources = item_data.get('resources', {})
-        
-        # Generate unique ID
-        schedule_id = f"{job_id}_schedule_row_{row_num}"
-        
-        return ScheduleItem(
-            id=schedule_id,
-            job_id=job_id,
-            row_number=row_num,
-            task=item_data.get('task', '').strip(),
-            is_main_task=item_data.get('isMainTask', False),
-            task_type=item_data.get('taskType', 'labour'),
-            hours=hours,
-            consumed=consumed,
-            percentage_complete=percentage_complete,
-            start_date=start_date,
-            end_date=end_date,
-            resources=resources if resources else None
-        )
-    
-    def _transform_consumed_item(self, item_data: Dict[str, Any], job_id: str, index: int) -> ConsumedItem:
-        """Transform Firestore consumed item to ConsumedItem model"""
+    def _insert_consumed_item(self, cursor, item_data: Dict[str, Any], job_id: str, index: int) -> bool:
+        """Insert consumed item using raw SQL"""
         cost_code = item_data.get('costCode', 'Unknown')
         amount_str = item_data.get('amount', '0')
         
-        # Parse amount
         try:
             amount = float(amount_str) if amount_str else 0.0
         except (ValueError, TypeError):
             amount = 0.0
         
-        # Categorize cost code
         category = self.embedding_service.categorize_cost_code(cost_code)
         
-        # Generate unique ID
         consumed_id = f"{job_id}_consumed_{index}"
         
-        return ConsumedItem(
-            id=consumed_id,
-            job_id=job_id,
-            cost_code=cost_code,
-            amount=amount,
-            category=category,
-            last_updated=datetime.utcnow()
+        sql = """
+            INSERT INTO consumed_items (
+                id, job_id, cost_code, amount, category, last_updated, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        values = (
+            consumed_id,
+            job_id,
+            cost_code,
+            amount,
+            category,
+            datetime.now(timezone.utc),
+            datetime.now(timezone.utc)
         )
+        
+        cursor.execute(sql, values)
+        return True
     
     async def migrate_job(self, company_id: str, job_id: str, skip_if_exists: bool = True) -> Dict[str, Any]:
         """
@@ -297,15 +287,14 @@ class ETLMigration:
             logger.info(f"✅ Job data fetched: {job_data.get('projectTitle', 'Unknown')}")
             
             # Step 2: Transform and migrate within a transaction
-            with session_scope() as session:
+            with session_scope() as cursor:
                 logger.info("🔄 Starting database transaction...")
                 
                 # 2.1: Migrate Job metadata
                 logger.info("📝 Migrating job metadata...")
-                job = self._transform_job(job_data)
-                session.add(job)
+                self._insert_job(cursor, job_data)
                 self.stats['job_migrated'] = True
-                logger.info(f"✅ Job metadata: {job.name}")
+                logger.info(f"✅ Job metadata: {job_data.get('projectTitle', 'Unknown')}")
                 
                 # 2.2: Migrate Estimate data
                 estimate_data = extract_estimate_data(job_data)
@@ -314,8 +303,7 @@ class ETLMigration:
                     entries = estimate_data.get('entries', [])
                     
                     for entry in entries:
-                        estimate = self._transform_estimate_row(entry, job_id)
-                        session.add(estimate)
+                        self._insert_estimate(cursor, entry, job_id)
                         self.stats['estimates_migrated'] += 1
                     
                     logger.info(f"✅ Estimates: {self.stats['estimates_migrated']} rows")
@@ -327,29 +315,12 @@ class ETLMigration:
                     entries = flooring_data.get('entries', [])
                     
                     for entry in entries:
-                        flooring = self._transform_flooring_estimate_row(entry, job_id)
-                        session.add(flooring)
+                        self._insert_flooring_estimate(cursor, entry, job_id)
                         self.stats['flooring_estimates_migrated'] += 1
                     
                     logger.info(f"✅ Flooring estimates: {self.stats['flooring_estimates_migrated']} rows")
                 
-                # 2.4: Migrate Schedule data
-                schedule_data = extract_schedule_data(job_data)
-                if schedule_data:
-                    logger.info(f"📝 Migrating schedule data ({schedule_data['total_rows']} rows)...")
-                    entries = schedule_data.get('entries', [])
-                    
-                    # Filter out empty tasks
-                    valid_entries = [e for e in entries if e.get('task', '').strip()]
-                    
-                    for entry in valid_entries:
-                        schedule_item = self._transform_schedule_item(entry, job_id)
-                        session.add(schedule_item)
-                        self.stats['schedule_items_migrated'] += 1
-                    
-                    logger.info(f"✅ Schedule items: {self.stats['schedule_items_migrated']} rows")
-                
-                # 2.5: Migrate Consumed data
+                # 2.4: Migrate Consumed data
                 consumed_data = job_data.get('consumed_data')
                 if consumed_data:
                     entries = consumed_data.get('entries', [])
@@ -357,14 +328,13 @@ class ETLMigration:
                         logger.info(f"📝 Migrating consumed data ({len(entries)} items)...")
                         
                         for idx, entry in enumerate(entries):
-                            consumed_item = self._transform_consumed_item(entry, job_id, idx)
-                            session.add(consumed_item)
+                            self._insert_consumed_item(cursor, entry, job_id, idx)
                             self.stats['consumed_items_migrated'] += 1
                         
                         logger.info(f"✅ Consumed items: {self.stats['consumed_items_migrated']} rows")
                 
-                # Transaction will auto-commit when exiting context manager
                 logger.info("💾 Committing transaction...")
+                # Transaction will auto-commit when exiting context manager
             
             # Step 3: Verification
             logger.info("🔍 Verifying migration...")
@@ -373,7 +343,6 @@ class ETLMigration:
             verification = {
                 'estimates': summary['estimates_count'] == self.stats['estimates_migrated'],
                 'flooring': summary['flooring_estimates_count'] == self.stats['flooring_estimates_migrated'],
-                'schedule': summary['schedule_items_count'] == self.stats['schedule_items_migrated'],
                 'consumed': summary['consumed_items_count'] == self.stats['consumed_items_migrated']
             }
             
@@ -394,10 +363,9 @@ class ETLMigration:
             logger.info(f"✅ Migration completed in {duration:.2f} seconds")
             logger.info(f"{'='*80}")
             logger.info(f"📊 Summary:")
-            logger.info(f"   Job: {job.name}")
+            logger.info(f"   Job: {job_data.get('projectTitle', 'Unknown')}")
             logger.info(f"   Estimates: {self.stats['estimates_migrated']}")
             logger.info(f"   Flooring Estimates: {self.stats['flooring_estimates_migrated']}")
-            logger.info(f"   Schedule Items: {self.stats['schedule_items_migrated']}")
             logger.info(f"   Consumed Items: {self.stats['consumed_items_migrated']}")
             logger.info(f"{'='*80}")
             
@@ -455,6 +423,9 @@ async def main():
         
         # Initialize PostgreSQL
         logger.info("🐘 Initializing PostgreSQL...")
+        from db_connection import init_database
+        init_database()  # CREATE TABLES IF NOT EXIST
+        
         db = get_db()
         if not db.test_connection():
             logger.error("❌ Failed to connect to PostgreSQL")

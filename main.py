@@ -5,7 +5,7 @@ FastAPI server with hybrid SQL + Vector agent system
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field 
 from typing import List, Optional, Dict, Any
 import os
 from contextlib import asynccontextmanager
@@ -589,7 +589,7 @@ if __name__ == "__main__":
     logger.info(f"🚀 Starting Agentic RAG API on port {port}")
     
     uvicorn.run(
-        "main_v2:app",
+        "main:app",
         host="0.0.0.0",
         port=port,
         reload=True,
