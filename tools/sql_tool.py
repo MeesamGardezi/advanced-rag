@@ -1,7 +1,7 @@
 """
 SafeSQLTool: Read-only SQL query execution with safety guardrails
 Retrieves ALL matching rows from PostgreSQL for precise calculations
-UPDATED: Uses psycopg2 directly instead of SQLAlchemy
+UPDATED: Smarter LIMIT handling for complete data retrieval
 """
 
 from typing import List, Dict, Any, Optional
@@ -25,8 +25,8 @@ class SafeSQLTool:
         'TRUNCATE', 'GRANT', 'REVOKE', 'CREATE', 'REPLACE'
     ]
     
-    # Maximum rows to return (safety limit)
-    MAX_ROWS = 1000
+    # Maximum rows to return for safety (increased from 1000 to 10000)
+    MAX_ROWS = 10000
     
     # Default timeout in seconds
     DEFAULT_TIMEOUT = 30
@@ -47,6 +47,7 @@ Use this tool to:
 2. Perform aggregations (SUM, AVG, COUNT, MIN, MAX)
 3. Filter by exact matches on structured fields
 
+IMPORTANT: This tool retrieves ALL matching rows (up to 10,000), NOT just top-K results.
 DO NOT use for semantic/text matching - use vector_tool for that.
 
 Examples:
@@ -80,17 +81,56 @@ Examples:
         
         return True, None
     
-    def _add_limit_if_missing(self, query: str) -> str:
-        """Add LIMIT clause if not present to prevent accidentally huge result sets"""
+    def _should_add_limit(self, query: str) -> bool:
+        """
+        Determine if LIMIT should be added to query
+        
+        Returns False if:
+        - Query already has LIMIT
+        - Query is an aggregation (COUNT, SUM, AVG, MAX, MIN)
+        - Query is getting specific IDs (WHERE id IN ...)
+        - Query filters by job_id (likely wants all rows for that job)
+        """
         query_upper = query.upper()
         
-        # If query already has LIMIT, return as-is
+        # Already has LIMIT
         if 'LIMIT' in query_upper:
+            return False
+        
+        # Aggregation queries don't need LIMIT
+        if any(agg in query_upper for agg in ['COUNT(', 'SUM(', 'AVG(', 'MAX(', 'MIN(']):
+            return False
+        
+        # Filtering by specific IDs (wants specific rows)
+        if 'WHERE ID IN' in query_upper or 'WHERE ID =' in query_upper:
+            return False
+        
+        # Filtering by job_id (wants all rows for that job)
+        if 'WHERE JOB_ID' in query_upper:
+            return False
+        
+        # If selecting just a few columns (like id, name), probably wants all
+        if re.search(r'SELECT\s+\w+\s*,?\s*\w*\s+FROM', query_upper):
+            # Check if it's selecting all columns or just id columns
+            select_match = re.search(r'SELECT\s+(.*?)\s+FROM', query_upper)
+            if select_match:
+                columns = select_match.group(1)
+                # If selecting just ID or very few columns, allow all rows
+                if ',' not in columns or columns.count(',') <= 2:
+                    return False
+        
+        return True
+    
+    def _add_limit_if_needed(self, query: str) -> str:
+        """Add LIMIT clause if appropriate"""
+        
+        if not self._should_add_limit(query):
             return query
+        
+        query_upper = query.upper()
         
         # If query has ORDER BY, add LIMIT before it
         if 'ORDER BY' in query_upper:
-            # Find ORDER BY position
             order_pos = query_upper.rfind('ORDER BY')
             return query[:order_pos] + f" LIMIT {self.MAX_ROWS} " + query[order_pos:]
         
@@ -117,7 +157,7 @@ Examples:
             result_lines.append(" | ".join(headers))
             result_lines.append("-" * 80)
         
-        # Rows (limit to first 50 for readability)
+        # Rows (limit to first 50 for readability in response)
         for row in rows[:50]:
             row_values = [str(v) if v is not None else 'NULL' for v in row.values()]
             result_lines.append(" | ".join(row_values))
@@ -157,11 +197,13 @@ Examples:
                     'error': error_msg
                 }
             
-            # Step 2: Add LIMIT if missing (safety)
-            safe_query = self._add_limit_if_missing(query)
+            # Step 2: Add LIMIT if needed (smart logic)
+            safe_query = self._add_limit_if_needed(query)
             
             if safe_query != query:
-                logger.warning(f"⚠️  Added LIMIT {self.MAX_ROWS} to query for safety")
+                logger.info(f"ℹ️  Added LIMIT {self.MAX_ROWS} to query for safety")
+            else:
+                logger.info(f"ℹ️  No LIMIT added - query will return all matching rows")
             
             # Step 3: Execute query using psycopg2 cursor
             with session_scope() as cursor:
@@ -368,9 +410,9 @@ if __name__ == "__main__":
     print(f"Success: {result['success']}")
     print(f"Error: {result['error']}\n")
     
-    # Test 3: Query without LIMIT (should add automatically)
-    print("Test 3: Query without LIMIT")
-    result = tool.execute("SELECT id, name FROM jobs")
+    # Test 3: Query without LIMIT (should NOT add for job_id filter)
+    print("Test 3: Query with job_id filter (no LIMIT added)")
+    result = tool.execute("SELECT * FROM estimates WHERE job_id = 'test123'")
     print(f"Success: {result['success']}")
     print(f"Rows: {result['row_count']}\n")
     
