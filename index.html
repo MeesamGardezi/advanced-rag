@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Construction RAG - Query Interface</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+
+        .query-section {
+            grid-column: 1 / -1;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        #questionInput {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+
+        #questionInput:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .btn {
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .examples {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .example-btn {
+            padding: 8px 15px;
+            background: #f0f0f0;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .example-btn:hover {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            color: #667eea;
+        }
+
+        .loading.active {
+            display: block;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .response-section {
+            display: none;
+        }
+
+        .response-section.active {
+            display: block;
+        }
+
+        .answer-box {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            margin-bottom: 20px;
+            white-space: pre-wrap;
+            line-height: 1.6;
+        }
+
+        .metadata {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .metadata-item {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 6px;
+            text-align: center;
+        }
+
+        .metadata-label {
+            font-size: 0.75rem;
+            color: #666;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+
+        .metadata-value {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .tool-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            background: #667eea;
+            color: white;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }
+
+        .success {
+            color: #28a745;
+            font-weight: 600;
+        }
+
+        .error {
+            color: #dc3545;
+            background: #fff5f5;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #dc3545;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+
+        .stat-item {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 0.85rem;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .api-endpoint {
+            background: #2d3748;
+            color: #68d391;
+            padding: 10px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏗️ Construction RAG System</h1>
+            <p>Hybrid SQL + Vector Architecture with Intelligent Agent</p>
+        </div>
+
+        <div class="main-content">
+            <!-- Query Section -->
+            <div class="card query-section">
+                <h2>💬 Ask a Question</h2>
+                <div class="input-group">
+                    <input 
+                        type="text" 
+                        id="questionInput" 
+                        placeholder="e.g., What is the total estimated cost for Hammond 2508?"
+                        onkeypress="handleKeyPress(event)"
+                    />
+                    <button class="btn" onclick="submitQuery()" id="submitBtn">
+                        Ask
+                    </button>
+                </div>
+
+                <div style="margin-bottom: 15px;">
+                    <strong>Example Queries:</strong>
+                </div>
+                <div class="examples">
+                    <button class="example-btn" onclick="setQuestion('List all jobs in the database')">
+                        📋 List Jobs
+                    </button>
+                    <button class="example-btn" onclick="setQuestion('How many estimate rows does Hammond 2508 have?')">
+                        🔢 Count Estimates
+                    </button>
+                    <button class="example-btn" onclick="setQuestion('What is the total estimated cost for Hammond 2508?')">
+                        💰 Total Cost
+                    </button>
+                    <button class="example-btn" onclick="setQuestion('Show me all allowances for Hammond 2508')">
+                        📊 Allowances
+                    </button>
+                    <button class="example-btn" onclick="setQuestion('Compare estimated vs budgeted costs for Hammond 2508')">
+                        ⚖️ Budget Comparison
+                    </button>
+                    <button class="example-btn" onclick="setQuestion('What is the total cost for cleanup materials in Hammond 2508?')">
+                        🧹 Cleanup (Semantic)
+                    </button>
+                    <button class="example-btn" onclick="setQuestion('Break down Hammond 2508 estimate by area')">
+                        📍 Breakdown by Area
+                    </button>
+                </div>
+
+                <div class="loading" id="loading">
+                    <div class="spinner"></div>
+                    <p style="margin-top: 10px;">Processing your query...</p>
+                </div>
+            </div>
+
+            <!-- Response Section -->
+            <div class="card response-section" id="responseSection">
+                <h2>📝 Answer</h2>
+                <div class="answer-box" id="answerBox"></div>
+
+                <div style="margin-top: 20px;">
+                    <strong>Tools Used:</strong><br>
+                    <div id="toolsUsed" style="margin-top: 10px;"></div>
+                </div>
+
+                <div class="metadata">
+                    <div class="metadata-item">
+                        <div class="metadata-label">Response Time</div>
+                        <div class="metadata-value" id="responseTime">-</div>
+                    </div>
+                    <div class="metadata-item">
+                        <div class="metadata-label">Status</div>
+                        <div class="metadata-value success" id="status">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Info -->
+            <div class="card">
+                <h2>🔧 System Info</h2>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-value" id="totalQueries">0</div>
+                        <div class="stat-label">Total Queries</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="successRate">0%</div>
+                        <div class="stat-label">Success Rate</div>
+                    </div>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <strong>API Endpoint:</strong>
+                    <div class="api-endpoint">
+                        POST http://localhost:8000/query
+                    </div>
+                </div>
+
+                <div style="margin-top: 15px;">
+                    <button class="btn" onclick="checkHealth()" style="width: 100%; background: #28a745;">
+                        🏥 Check System Health
+                    </button>
+                </div>
+            </div>
+
+            <!-- Recent Queries -->
+            <div class="card">
+                <h2>📜 Recent Queries</h2>
+                <div id="recentQueries" style="font-size: 0.9rem; color: #666;">
+                    No queries yet. Try asking a question!
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        let queryHistory = [];
+        let stats = {
+            total: 0,
+            successful: 0
+        };
+
+        function setQuestion(question) {
+            document.getElementById('questionInput').value = question;
+            document.getElementById('questionInput').focus();
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                submitQuery();
+            }
+        }
+
+        async function submitQuery() {
+            const question = document.getElementById('questionInput').value.trim();
+            
+            if (!question) {
+                alert('Please enter a question');
+                return;
+            }
+
+            // Show loading
+            document.getElementById('loading').classList.add('active');
+            document.getElementById('responseSection').classList.remove('active');
+            document.getElementById('submitBtn').disabled = true;
+
+            try {
+                const response = await fetch(`${API_BASE}/query`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ question })
+                });
+
+                const data = await response.json();
+
+                // Update stats
+                stats.total++;
+                if (data.success) {
+                    stats.successful++;
+                }
+
+                // Add to history
+                queryHistory.unshift({
+                    question,
+                    success: data.success,
+                    timestamp: new Date().toLocaleTimeString()
+                });
+                if (queryHistory.length > 5) queryHistory.pop();
+
+                // Display response
+                displayResponse(data);
+                updateStats();
+                updateRecentQueries();
+
+            } catch (error) {
+                displayError(error.message);
+            } finally {
+                document.getElementById('loading').classList.remove('active');
+                document.getElementById('submitBtn').disabled = false;
+            }
+        }
+
+        function displayResponse(data) {
+            const responseSection = document.getElementById('responseSection');
+            const answerBox = document.getElementById('answerBox');
+            const toolsUsed = document.getElementById('toolsUsed');
+            const responseTime = document.getElementById('responseTime');
+            const status = document.getElementById('status');
+
+            if (data.success) {
+                answerBox.textContent = data.answer;
+                
+                // Display tools
+                toolsUsed.innerHTML = data.tools_used
+                    .map(tool => `<span class="tool-badge">${tool.tool}</span>`)
+                    .join('');
+
+                // Display metadata
+                responseTime.textContent = `${Math.round(data.response_time_ms)}ms`;
+                status.textContent = '✓ Success';
+                status.className = 'metadata-value success';
+
+                responseSection.classList.add('active');
+            } else {
+                displayError(data.error || 'Unknown error');
+            }
+        }
+
+        function displayError(message) {
+            const responseSection = document.getElementById('responseSection');
+            const answerBox = document.getElementById('answerBox');
+            
+            answerBox.innerHTML = `<div class="error">❌ Error: ${message}</div>`;
+            document.getElementById('toolsUsed').innerHTML = '';
+            document.getElementById('responseTime').textContent = '-';
+            document.getElementById('status').textContent = '✗ Failed';
+            document.getElementById('status').className = 'metadata-value';
+            document.getElementById('status').style.color = '#dc3545';
+            
+            responseSection.classList.add('active');
+        }
+
+        function updateStats() {
+            document.getElementById('totalQueries').textContent = stats.total;
+            const successRate = stats.total > 0 
+                ? Math.round((stats.successful / stats.total) * 100) 
+                : 0;
+            document.getElementById('successRate').textContent = `${successRate}%`;
+        }
+
+        function updateRecentQueries() {
+            const recentQueriesDiv = document.getElementById('recentQueries');
+            
+            if (queryHistory.length === 0) {
+                recentQueriesDiv.innerHTML = 'No queries yet. Try asking a question!';
+                return;
+            }
+
+            recentQueriesDiv.innerHTML = queryHistory
+                .map(q => `
+                    <div style="padding: 8px; margin-bottom: 8px; background: #f8f9fa; border-radius: 4px; cursor: pointer;"
+                         onclick="setQuestion('${q.question.replace(/'/g, "\\'")}')">
+                        <strong>${q.timestamp}</strong> - ${q.question.substring(0, 50)}${q.question.length > 50 ? '...' : ''}
+                        <span style="float: right; ${q.success ? 'color: #28a745;' : 'color: #dc3545;'}">
+                            ${q.success ? '✓' : '✗'}
+                        </span>
+                    </div>
+                `)
+                .join('');
+        }
+
+        async function checkHealth() {
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                const data = await response.json();
+                
+                const status = data.status === 'healthy' ? '✅ System Healthy' : '⚠️ System Issues';
+                const message = `
+Status: ${status}
+Database: ${data.database.status}
+Agent: ${data.agent.status}
+
+Table Counts:
+- Jobs: ${data.database.table_counts?.jobs || 0}
+- Estimates: ${data.database.table_counts?.estimates || 0}
+- Flooring: ${data.database.table_counts?.flooring_estimates || 0}
+- Schedule: ${data.database.table_counts?.schedule_items || 0}
+- Consumed: ${data.database.table_counts?.consumed_items || 0}
+                `.trim();
+                
+                alert(message);
+            } catch (error) {
+                alert(`❌ Health check failed: ${error.message}\n\nMake sure the API is running on ${API_BASE}`);
+            }
+        }
+
+        // Load initial stats on page load
+        window.addEventListener('load', () => {
+            updateStats();
+        });
+    </script>
+</body>
+</html>

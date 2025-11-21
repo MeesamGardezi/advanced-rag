@@ -1,6 +1,7 @@
 """
 SemanticFilterTool: Vector-based semantic filtering of SQL candidates
 Filters candidate rows using text similarity in ChromaDB
+FIXED: ChromaDB where filter syntax and OpenAI API compatibility
 """
 
 from typing import List, Dict, Any, Optional, Set
@@ -184,11 +185,19 @@ DO NOT use for exact matching - use SQL tool for that.
                     'filtered_count': 0
                 }
             
-            # Build ChromaDB where filter
-            where_filter = {'data_type': data_type}
-            
+            # Build ChromaDB where filter with proper operator syntax
+            # ChromaDB requires explicit operators like $and, $eq
             if job_id:
-                where_filter['job_id'] = job_id
+                where_filter = {
+                    "$and": [
+                        {"data_type": {"$eq": data_type}},
+                        {"job_id": {"$eq": job_id}}
+                    ]
+                }
+            else:
+                where_filter = {"data_type": {"$eq": data_type}}
+            
+            logger.info(f"   Using where filter: {where_filter}")
             
             # Query ChromaDB with semantic query
             # Request more results to ensure we get all candidates
@@ -292,11 +301,16 @@ DO NOT use for exact matching - use SQL tool for that.
         try:
             threshold = similarity_threshold if similarity_threshold is not None else self.similarity_threshold
             
-            # Build where filter
-            where_filter = {'data_type': data_type}
-            
+            # Build where filter with proper operator syntax
             if job_id:
-                where_filter['job_id'] = job_id
+                where_filter = {
+                    "$and": [
+                        {"data_type": {"$eq": data_type}},
+                        {"job_id": {"$eq": job_id}}
+                    ]
+                }
+            else:
+                where_filter = {"data_type": {"$eq": data_type}}
             
             # Query ChromaDB
             results = self.collection.query(
@@ -378,10 +392,18 @@ DO NOT use for exact matching - use SQL tool for that.
             ref_document = ref_doc['documents'][0]
             
             # Build where filter
-            where_filter = {'data_type': ref_metadata.get('data_type')}
+            data_type = ref_metadata.get('data_type')
             
             if same_job_only:
-                where_filter['job_id'] = ref_metadata.get('job_id')
+                job_id = ref_metadata.get('job_id')
+                where_filter = {
+                    "$and": [
+                        {"data_type": {"$eq": data_type}},
+                        {"job_id": {"$eq": job_id}}
+                    ]
+                }
+            else:
+                where_filter = {"data_type": {"$eq": data_type}}
             
             # Query for similar items
             results = self.collection.query(

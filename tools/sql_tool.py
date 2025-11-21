@@ -1,11 +1,10 @@
 """
 SafeSQLTool: Read-only SQL query execution with safety guardrails
 Retrieves ALL matching rows from PostgreSQL for precise calculations
+UPDATED: Uses psycopg2 directly instead of SQLAlchemy
 """
 
 from typing import List, Dict, Any, Optional
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 import re
 import logging
 
@@ -164,19 +163,17 @@ Examples:
             if safe_query != query:
                 logger.warning(f"⚠️  Added LIMIT {self.MAX_ROWS} to query for safety")
             
-            # Step 3: Execute query
-            with session_scope() as session:
-                result = session.execute(text(safe_query))
+            # Step 3: Execute query using psycopg2 cursor
+            with session_scope() as cursor:
+                cursor.execute(safe_query)
                 
-                # Fetch results
-                if result.returns_rows:
-                    rows = result.fetchall()
+                # Check if query returns rows
+                if cursor.description:
+                    # Fetch all results
+                    rows = cursor.fetchall()
                     
-                    # Convert to list of dicts
-                    data = []
-                    if rows and result.keys():
-                        keys = result.keys()
-                        data = [dict(zip(keys, row)) for row in rows]
+                    # Convert to list of dicts (RealDictCursor returns RealDictRow objects)
+                    data = [dict(row) for row in rows]
                     
                     formatted = self._format_results(data)
                     
@@ -199,20 +196,13 @@ Examples:
                         'error': None
                     }
         
-        except SQLAlchemyError as e:
+        except Exception as e:
             error_msg = f"SQL execution error: {str(e)}"
             logger.error(f"❌ {error_msg}")
-            return {
-                'success': False,
-                'data': [],
-                'formatted_result': error_msg,
-                'row_count': 0,
-                'error': error_msg
-            }
-        
-        except Exception as e:
-            error_msg = f"Unexpected error: {str(e)}"
-            logger.error(f"❌ {error_msg}")
+            
+            import traceback
+            logger.error(traceback.format_exc())
+            
             return {
                 'success': False,
                 'data': [],

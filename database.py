@@ -1,10 +1,17 @@
+"""
+Database Initialization Module
+Handles Firebase/Firestore and ChromaDB connections
+UPDATED: OpenAI API v1.0+ compatible embeddings
+"""
+
 import os
 import json
 from typing import Dict, List, Any, Optional
 import firebase_admin
 from firebase_admin import credentials, firestore
 import chromadb
-from chromadb.utils import embedding_functions
+from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
+from openai import OpenAI
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -14,6 +21,62 @@ load_dotenv()
 firebase_db = None
 chroma_client = None
 chroma_collection = None
+
+
+# ==========================================
+# CUSTOM OPENAI EMBEDDING FUNCTION
+# Compatible with openai>=1.0.0
+# ==========================================
+
+class CustomOpenAIEmbeddingFunction(EmbeddingFunction):
+    """
+    Custom embedding function using OpenAI API v1.0+
+    Replaces ChromaDB's built-in OpenAIEmbeddingFunction which uses old API
+    """
+    
+    def __init__(
+        self,
+        api_key: str,
+        model_name: str = "text-embedding-3-small"
+    ):
+        """
+        Initialize the embedding function
+        
+        Args:
+            api_key: OpenAI API key
+            model_name: Name of the embedding model
+        """
+        self.client = OpenAI(api_key=api_key)
+        self.model_name = model_name
+    
+    def __call__(self, input: Documents) -> Embeddings:
+        """
+        Generate embeddings for input documents
+        
+        Args:
+            input: List of text documents
+        
+        Returns:
+            List of embedding vectors
+        """
+        # Replace newlines with spaces (OpenAI recommendation)
+        texts = [text.replace("\n", " ") for text in input]
+        
+        # Call OpenAI API v1.0+
+        response = self.client.embeddings.create(
+            input=texts,
+            model=self.model_name
+        )
+        
+        # Extract embeddings
+        embeddings = [item.embedding for item in response.data]
+        
+        return embeddings
+
+
+# ==========================================
+# FIREBASE INITIALIZATION
+# ==========================================
 
 def initialize_firebase():
     """Initialize Firebase Admin SDK"""
@@ -51,8 +114,14 @@ def initialize_firebase():
         print(f"❌ Error initializing Firebase: {e}")
         raise
 
+
+# ==========================================
+# CHROMADB INITIALIZATION
+# UPDATED: Uses custom OpenAI embedding function
+# ==========================================
+
 def initialize_chromadb():
-    """Initialize ChromaDB with persistence"""
+    """Initialize ChromaDB with persistence and custom OpenAI embeddings"""
     global chroma_client, chroma_collection
     
     if chroma_collection is not None:
@@ -63,8 +132,9 @@ def initialize_chromadb():
         persist_path = os.getenv("CHROMA_PERSIST_PATH", "./chroma_storage")
         collection_name = os.getenv("CHROMA_COLLECTION_NAME", "construction_rag")
         
-        # Create OpenAI embedding function
-        openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+        # FIXED: Use custom OpenAI embedding function compatible with openai>=1.0.0
+        # This replaces the old chromadb.utils.embedding_functions.OpenAIEmbeddingFunction
+        openai_ef = CustomOpenAIEmbeddingFunction(
             api_key=os.getenv("OPENAI_API_KEY"),
             model_name=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
         )
@@ -86,17 +156,28 @@ def initialize_chromadb():
         print(f"❌ Error initializing ChromaDB: {e}")
         raise
 
+
+# ==========================================
+# DATABASE GETTERS
+# ==========================================
+
 def get_firebase_db():
     """Get Firebase database instance"""
     if firebase_db is None:
         initialize_firebase()
     return firebase_db
 
+
 def get_chroma_collection():
     """Get ChromaDB collection instance"""
     if chroma_collection is None:
         initialize_chromadb()
     return chroma_collection
+
+
+# ==========================================
+# FIREBASE DATA FETCHING
+# ==========================================
 
 async def fetch_job_consumed_data(company_id: str, job_id: str) -> Optional[Dict[str, Any]]:
     """Fetch consumed data for a specific job"""
@@ -118,6 +199,7 @@ async def fetch_job_consumed_data(company_id: str, job_id: str) -> Optional[Dict
     except Exception as e:
         print(f"Error fetching consumed job data: {e}")
         return None
+
 
 async def fetch_job_complete_data(company_id: str, job_id: str) -> Optional[Dict[str, Any]]:
     """Fetch complete job data including estimate and schedule"""
@@ -144,6 +226,11 @@ async def fetch_job_complete_data(company_id: str, job_id: str) -> Optional[Dict
     except Exception as e:
         print(f"Error fetching complete job data: {e}")
         return None
+
+
+# ==========================================
+# DATA EXTRACTION HELPERS
+# ==========================================
 
 def extract_estimate_data(job_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Extract estimate data from complete job data with row numbers"""
@@ -175,6 +262,7 @@ def extract_estimate_data(job_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         'estimate_type': job_data.get('estimateType', 'general')
     }
 
+
 def extract_flooring_estimate_data(job_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Extract flooring estimate data from complete job data with row numbers"""
     if not job_data or 'flooringEstimateData' not in job_data:
@@ -203,6 +291,7 @@ def extract_flooring_estimate_data(job_data: Dict[str, Any]) -> Optional[Dict[st
         'client_name': job_data.get('clientName', ''),
         'site_location': f"{job_data.get('siteCity', '')}, {job_data.get('siteState', '')}".strip(', ')
     }
+
 
 def extract_schedule_data(job_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Extract schedule data from complete job data with row numbers"""
@@ -233,3 +322,29 @@ def extract_schedule_data(job_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         'site_location': f"{job_data.get('siteCity', '')}, {job_data.get('siteState', '')}".strip(', '),
         'schedule_last_updated': job_data.get('scheduleLastUpdated', '')
     }
+
+
+# ==========================================
+# MAIN INITIALIZATION
+# ==========================================
+
+if __name__ == "__main__":
+    print("🧪 Testing database connections...\n")
+    
+    # Test Firebase
+    print("Testing Firebase...")
+    try:
+        initialize_firebase()
+        print("✅ Firebase connection successful\n")
+    except Exception as e:
+        print(f"❌ Firebase connection failed: {e}\n")
+    
+    # Test ChromaDB
+    print("Testing ChromaDB...")
+    try:
+        initialize_chromadb()
+        print("✅ ChromaDB connection successful\n")
+    except Exception as e:
+        print(f"❌ ChromaDB connection failed: {e}\n")
+    
+    print("✅ Database tests complete")
