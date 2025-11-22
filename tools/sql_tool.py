@@ -157,13 +157,22 @@ Examples:
             result_lines.append(" | ".join(headers))
             result_lines.append("-" * 80)
         
-        # Rows (limit to first 50 for readability in response)
-        for row in rows[:50]:
+        # --- SMART LIMIT LOGIC ---
+        # If we are just fetching IDs (1-2 columns), show ALL rows (up to 5000)
+        # This allows the agent to see all candidates for vector filtering
+        if rows and len(rows[0].keys()) <= 2:
+            display_limit = 5000
+        else:
+            # For wide rows (many columns), keep the 50 row limit for readability
+            display_limit = 50
+        
+        # Rows
+        for row in rows[:display_limit]:
             row_values = [str(v) if v is not None else 'NULL' for v in row.values()]
             result_lines.append(" | ".join(row_values))
         
-        if len(rows) > 50:
-            result_lines.append(f"\n... and {len(rows) - 50} more rows")
+        if len(rows) > display_limit:
+            result_lines.append(f"\n... and {len(rows) - display_limit} more rows")
         
         return "\n".join(result_lines)
     

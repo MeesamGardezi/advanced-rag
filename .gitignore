@@ -1,3 +1,27 @@
+# Environment Variables
 .env
-/venv_agentic_rag
-venv_agentic_rag
+.env.*
+
+# Virtual Environments
+venv/
+venv_agentic_rag/
+env/
+.venv/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Database Storage
+chroma_storage/
+*.db
+*.sqlite3
+
+# IDE Settings
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log

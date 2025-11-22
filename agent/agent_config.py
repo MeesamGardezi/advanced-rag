@@ -188,8 +188,36 @@ def create_vector_tool_wrapper() -> StructuredTool:
         # Parse candidate_ids
         ids_list = [id.strip() for id in candidate_ids.split(',') if id.strip()]
         
+        # --- NEW LOGIC START ---
+        # If no candidates provided, fall back to direct vector search
         if not ids_list:
-            return "Error: No candidate IDs provided"
+            if job_id:
+                result = vector_tool.search_by_text(
+                    semantic_query=semantic_query,
+                    data_type=data_type,
+                    job_id=job_id,
+                    n_results=100
+                )
+                
+                if result['success']:
+                    results = result['results']
+                    if not results:
+                        return f"No semantic matches found for '{semantic_query}' in job {job_id}"
+                    
+                    # Format output
+                    response_lines = [
+                        f"Direct Semantic Search for '{semantic_query}':",
+                        f"Found: {len(results)} matches",
+                        f"\nMatching IDs:"
+                    ]
+                    for item in results:
+                        response_lines.append(f"  - {item['id']} (similarity: {item['similarity']:.3f})")
+                    return "\n".join(response_lines)
+                else:
+                    return f"Error in direct search: {result.get('error', 'Unknown error')}"
+            else:
+                return "Error: No candidate IDs provided and no Job ID for fallback search"
+        # --- NEW LOGIC END ---
         
         result = vector_tool.filter_candidates(
             candidate_ids=ids_list,
