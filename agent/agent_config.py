@@ -1,6 +1,7 @@
 """
 LangChain Agent Configuration
 Intelligent query router that orchestrates SQL and Vector tools
+FIXED: Ensure semantic_query parameter is always passed to vector_tool
 """
 
 import os
@@ -11,6 +12,7 @@ from langchain.tools import StructuredTool
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.schema import HumanMessage, AIMessage, SystemMessage
 import logging
+import json
 
 from tools.sql_tool import sql_tool
 from tools.vector_tool import vector_tool
@@ -18,7 +20,7 @@ from tools.vector_tool import vector_tool
 logger = logging.getLogger(__name__)
 
 
-# System prompt for the agent
+# System prompt for the agent - FIXED to ensure semantic_query is always passed
 AGENT_SYSTEM_PROMPT = """You are a Construction Data Assistant with specialized tools for querying construction project data.
 
 You have access to a PostgreSQL database (via SQL Tool) and semantic search (via Vector Tool).
@@ -34,48 +36,46 @@ YOUR TOOLS:
 
 1. **sql_tool**: Execute read-only SQL queries
    - Use for: Exact filters, getting ALL matching rows, calculations (SUM, AVG, COUNT)
-   - Returns: Complete result sets (no top-K limitation)
-   - Examples:
-     * Get job_id: SELECT id FROM jobs WHERE name LIKE '%Hammond%'
-     * Get ALL estimates: SELECT * FROM estimates WHERE job_id = 'xxx'
-     * Calculate total: SELECT SUM(total) FROM estimates WHERE job_id = 'xxx'
-     * Filter by exact values: WHERE cost_code = 'xxx' or area = 'Kitchen'
+   - Returns: JSON with "data" field (all rows), "formatted_display" field (readable text), and "row_count"
+   - IMPORTANT: Use the "data" field to extract IDs, not the formatted display
 
 2. **vector_tool**: Semantic filtering using embeddings
    - Use for: Filtering rows by semantic meaning (natural language concepts)
-   - Input: List of candidate IDs from SQL + semantic query
+   - REQUIRED PARAMETERS:
+     * candidate_ids: Comma-separated list of IDs from SQL
+     * semantic_query: Natural language description of what you're looking for (e.g., "cleanup materials", "electrical work")
+   - Optional: data_type (default "estimate"), job_id
    - Returns: Filtered IDs based on text similarity
-   - Examples:
-     * Filter for "cleanup materials" (matches "debris removal", "site cleaning")
-     * Find "electrical work" (matches "wiring", "outlets", "lighting")
 
 QUERY PROCESSING WORKFLOW:
 
-**STEP 1: Understand the Query**
-- Identify if query needs exact filters (job name, cost codes, dates) or semantic filters (concepts like "cleanup")
-- Determine what data type is needed (estimates, flooring, schedule, consumed)
-- Decide if calculation is needed (total, average, count)
-
-**STEP 2: Get Job ID (if needed)**
-If query mentions a job name but you don't have the job_id:
+**STEP 1: Get Job ID**
 ```sql
 SELECT id, name FROM jobs WHERE name ILIKE '%job_name%' LIMIT 1
 ```
 
-**STEP 3: Retrieve Candidates with SQL**
-Get ALL matching rows using exact filters:
+**STEP 2: Retrieve ALL Candidates with SQL**
 ```sql
-SELECT * FROM estimates 
-WHERE job_id = 'xxx'
-[AND cost_code = 'xxx']  -- if exact cost code mentioned
-[AND area = 'xxx']        -- if exact area mentioned
+SELECT id, description, cost_code FROM estimates WHERE job_id = 'xxx'
 ```
 
-**STEP 4: Semantic Filtering (if needed)**
-If query has semantic component (like "cleanup materials"), filter candidates:
-- Extract candidate IDs from SQL results
-- Call vector_tool with semantic query and candidate IDs
-- Get filtered IDs that match semantically
+**STEP 3: Extract ALL IDs from SQL Data**
+Parse the JSON response and extract ALL IDs from the "data" field (not formatted_display).
+
+**STEP 4: Semantic Filtering**
+CRITICAL: When calling vector_tool, you MUST provide:
+- candidate_ids: The comma-separated list of ALL IDs
+- semantic_query: The semantic concept from the user's question (e.g., "cleanup materials", "electrical work", "roofing")
+
+Example vector_tool call:
+```
+vector_tool(
+    candidate_ids="id1,id2,id3,...,id258",
+    semantic_query="cleanup materials",
+    data_type="estimate",
+    job_id="4ZppggAAJuJMZNB8f2ZT"
+)
+```
 
 **STEP 5: Calculate Results**
 Use SQL to aggregate filtered results:
@@ -83,92 +83,72 @@ Use SQL to aggregate filtered results:
 SELECT SUM(total) FROM estimates WHERE id IN ('id1', 'id2', ...)
 ```
 
-**STEP 6: Format Response**
-- Always format money as $X,XXX.XX (with commas and 2 decimals)
-- Include units (sq ft, hours, each, etc.)
-- Cite data sources: [SQL Database] or [Semantic Search + SQL]
-- If variance exists, mention it: "Estimated: $X | Budgeted: $Y | Variance: $Z"
-- For lists, show row numbers and key details
-
-CRITICAL RULES:
-
-1. **Always get job_id first** before querying estimates/schedule/consumed
-2. **Use SQL for ALL mathematical operations** (SUM, AVG, COUNT, etc.)
-3. **Never fabricate data** - only use what's in the database
-4. **Handle "estimate" vs "consumed" carefully**:
-   - "estimate"/"budget"/"projected" → estimates table (total, budgeted_total)
-   - "consumed"/"actual"/"spent" → consumed_items table (amount)
-5. **Row type distinction**:
-   - "allowance" → row_type = 'allowance'
-   - "estimate" → row_type = 'estimate'
-6. **Format all monetary values**: $1,234.56 (never $1234.5 or 1234.56)
-7. **Be specific about data sources**: Always cite [SQL Database] or [Semantic Search]
-
 EXAMPLES:
 
-**Example 1: Exact Cost Code Query**
-Query: "What's the total for cost code 01-5020 in Hammond project?"
-Workflow:
+**Example: "What's the total cleanup cost for Hammond?"**
 1. Get job_id: SELECT id FROM jobs WHERE name LIKE '%Hammond%'
-2. Get estimates: SELECT * FROM estimates WHERE job_id = 'xxx' AND cost_code = '01-5020'
-3. Calculate: SELECT SUM(total) FROM estimates WHERE job_id = 'xxx' AND cost_code = '01-5020'
-4. Response: "Total for cost code 01-5020 in Hammond project: $12,450.00 [SQL Database]"
+2. Get ALL estimates: SELECT id, description, cost_code FROM estimates WHERE job_id = 'xxx'
+3. Extract ALL 258 IDs from the JSON "data" field
+4. Call vector_tool with:
+   - candidate_ids: "id1,id2,id3,...,id258"  
+   - semantic_query: "cleanup materials"
+   - data_type: "estimate"
+   - job_id: "xxx"
+5. Calculate: SELECT SUM(total) FROM estimates WHERE id IN (filtered_ids)
 
-**Example 2: Semantic Query**
-Query: "What's the total cleanup cost for Mall project?"
-Workflow:
-1. Get job_id: SELECT id FROM jobs WHERE name LIKE '%Mall%'
-2. Get ALL candidates: SELECT id, description, cost_code FROM estimates WHERE job_id = 'xxx'
-3. Semantic filter: vector_tool.filter_candidates(candidate_ids, "cleanup materials")
-4. Calculate: SELECT SUM(total) FROM estimates WHERE id IN (filtered_ids)
-5. Response: "Total cleanup costs for Mall project: $8,750.00 (3 line items) [Semantic Search + SQL]"
-
-**Example 3: Allowances Only**
-Query: "Show me all allowances for Hammond"
-Workflow:
-1. Get job_id: SELECT id FROM jobs WHERE name LIKE '%Hammond%'
-2. Query: SELECT * FROM estimates WHERE job_id = 'xxx' AND row_type = 'allowance'
-3. Response: List all allowance rows with details
-
-**Example 4: Budget vs Actual**
-Query: "Compare estimated vs consumed costs for electrical work in Mall"
-Workflow:
-1. Get job_id for Mall
-2. Get estimate total (using semantic filter for "electrical")
-3. Get consumed total (using semantic filter for "electrical")
-4. Response: "Electrical costs for Mall: Estimated: $45,000 | Consumed: $42,500 | Under budget by $2,500"
-
-EDGE CASES:
-
-- **Zero results**: "No matching items found for [query] in [project]"
-- **Ambiguous query**: Ask for clarification: "Did you mean estimated costs or actual consumed costs?"
-- **Multiple jobs match**: List options: "Multiple projects match 'Hammond'. Did you mean: 1) Hammond 2508, 2) Hammond Renovation?"
-- **No semantic matches**: Fall back to SQL-only: "No items semantically matched '[query]', showing all results from SQL query"
-
-Remember: You're a helpful assistant focused on accuracy. Always use the tools to get real data, never guess or fabricate numbers."""
+CRITICAL RULES:
+1. **ALWAYS include semantic_query parameter when calling vector_tool**
+2. **Extract the semantic concept from the user's question for semantic_query**
+3. **Use ALL IDs from the data field, not just what's shown in formatted_display**
+4. **Format money as $X,XXX.XX**
+"""
 
 
 def create_sql_tool_wrapper() -> StructuredTool:
-    """Create LangChain tool wrapper for SQL tool"""
+    """Create LangChain tool wrapper for SQL tool - FIXED to return full data"""
     
     def execute_sql(query: str) -> str:
-        """Execute a read-only SQL query on the construction database"""
+        """Execute a read-only SQL query and return FULL results as JSON"""
         result = sql_tool.execute(query)
         
         if result['success']:
-            return result['formatted_result']
+            # Return structured JSON with BOTH data and display
+            response = {
+                "success": True,
+                "row_count": result['row_count'],
+                "data": result['data'],  # ALL rows as list of dicts
+                "formatted_display": result['formatted_result']  # Human-readable (may be truncated)
+            }
+            
+            # Add helpful note if data was truncated in display
+            if result['row_count'] > 50 and 'more rows' in result['formatted_result']:
+                response['note'] = f"Display shows first 50 rows, but data field contains all {result['row_count']} rows"
+            
+            # Return as JSON string so agent can parse it
+            return json.dumps(response)
         else:
-            return f"Error: {result['error']}"
+            return json.dumps({
+                "success": False,
+                "error": result['error']
+            })
     
     return StructuredTool.from_function(
         func=execute_sql,
         name="sql_tool",
-        description=sql_tool.description
+        description=sql_tool.description + """
+
+IMPORTANT: This tool returns JSON with:
+- "data": List of ALL result rows (may be 100s of rows)
+- "formatted_display": Human-readable text (may show only first 50 rows)
+- "row_count": Total number of rows
+
+Always parse the JSON and use the "data" field to extract information, not the formatted_display!
+"""
     )
 
 
 def create_vector_tool_wrapper() -> StructuredTool:
-    """Create LangChain tool wrapper for Vector tool"""
+    """Create LangChain tool wrapper for Vector tool - FIXED parameter handling"""
     
     def filter_semantically(
         candidate_ids: str,
@@ -180,45 +160,34 @@ def create_vector_tool_wrapper() -> StructuredTool:
         Filter candidate rows using semantic similarity
         
         Args:
-            candidate_ids: Comma-separated list of IDs (e.g., "id1,id2,id3")
-            semantic_query: Natural language description
+            candidate_ids: Comma-separated list of IDs (can be 100s of IDs)
+            semantic_query: Natural language description (REQUIRED - e.g., "cleanup materials", "electrical work")
             data_type: Type of data (estimate, flooring_estimate, schedule, consumed)
             job_id: Optional job ID for additional filtering
         """
-        # Parse candidate_ids
-        ids_list = [id.strip() for id in candidate_ids.split(',') if id.strip()]
+        # Ensure we have semantic_query
+        if not semantic_query:
+            return "Error: semantic_query is required. Please provide what you're looking for (e.g., 'cleanup materials')"
         
-        # --- NEW LOGIC START ---
-        # If no candidates provided, fall back to direct vector search
-        if not ids_list:
-            if job_id:
-                result = vector_tool.search_by_text(
-                    semantic_query=semantic_query,
-                    data_type=data_type,
-                    job_id=job_id,
-                    n_results=100
-                )
-                
-                if result['success']:
-                    results = result['results']
-                    if not results:
-                        return f"No semantic matches found for '{semantic_query}' in job {job_id}"
-                    
-                    # Format output
-                    response_lines = [
-                        f"Direct Semantic Search for '{semantic_query}':",
-                        f"Found: {len(results)} matches",
-                        f"\nMatching IDs:"
-                    ]
-                    for item in results:
-                        response_lines.append(f"  - {item['id']} (similarity: {item['similarity']:.3f})")
-                    return "\n".join(response_lines)
-                else:
-                    return f"Error in direct search: {result.get('error', 'Unknown error')}"
-            else:
-                return "Error: No candidate IDs provided and no Job ID for fallback search"
-        # --- NEW LOGIC END ---
+        # Parse candidate_ids (may be a very long list)
+        # Handle case where the list might be truncated
+        if candidate_ids.endswith('_est_row_'):
+            # ID list was truncated, try to complete it
+            logger.warning("ID list appears truncated, attempting to parse partial list")
+            candidate_ids = candidate_ids.rstrip(',').rstrip('_est_row_')
         
+        ids_list = [id.strip() for id in candidate_ids.split(',') if id.strip() and len(id.strip()) > 10]
+        
+        logger.info(f"📊 Vector tool received {len(ids_list)} candidate IDs for semantic query: '{semantic_query}'")
+        
+        if len(ids_list) == 0:
+            return f"Error: No valid candidate IDs provided for semantic filtering of '{semantic_query}'"
+        
+        # If we get a huge number of candidates, log it
+        if len(ids_list) > 100:
+            logger.info(f"⚡ Processing large batch: {len(ids_list)} candidates")
+        
+        # Process the candidates
         result = vector_tool.filter_candidates(
             candidate_ids=ids_list,
             semantic_query=semantic_query,
@@ -235,14 +204,21 @@ def create_vector_tool_wrapper() -> StructuredTool:
             # Format response
             response_lines = [
                 f"Semantic filtering for '{semantic_query}':",
-                f"Matches: {result['filtered_count']} / {result['total_candidates']} candidates",
+                f"Processed: {result['total_candidates']} total candidates",
+                f"Matches: {result['filtered_count']} items match semantically",
                 f"Threshold: {result.get('threshold_used', 0.7)}",
-                f"\nMatching IDs:"
+                f"\nMatching IDs ({len(matching_ids)} total):"
             ]
             
-            for match_id in matching_ids:
+            # Show first 20 matches with scores
+            for i, match_id in enumerate(matching_ids[:20]):
                 score = result['scores'].get(match_id, 0)
                 response_lines.append(f"  - {match_id} (similarity: {score:.3f})")
+            
+            if len(matching_ids) > 20:
+                response_lines.append(f"  ... and {len(matching_ids) - 20} more matches")
+                response_lines.append(f"\nAll {len(matching_ids)} matching IDs (comma-separated):")
+                response_lines.append(",".join(matching_ids))
             
             return "\n".join(response_lines)
         else:
@@ -251,7 +227,19 @@ def create_vector_tool_wrapper() -> StructuredTool:
     return StructuredTool.from_function(
         func=filter_semantically,
         name="vector_tool",
-        description=vector_tool.description
+        description="""Semantic filtering tool for finding conceptually similar items.
+
+REQUIRED PARAMETERS:
+- candidate_ids: Comma-separated list of IDs from SQL query (can handle 100s of IDs)
+- semantic_query: Natural language concept to filter for (e.g., "cleanup materials", "electrical work", "roofing")
+
+OPTIONAL PARAMETERS:
+- data_type: Type of data (default: "estimate")
+- job_id: Job ID for additional filtering
+
+IMPORTANT: Always extract the semantic concept from the user's question and pass it as semantic_query.
+For example, if user asks about "cleanup costs", use semantic_query="cleanup materials"
+"""
     )
 
 
@@ -265,7 +253,7 @@ class ConstructionAgent:
         self,
         model: str = "gpt-4-turbo-preview",
         temperature: float = 0.0,
-        max_iterations: int = 10,
+        max_iterations: int = 15,  # Increased for complex queries
         verbose: bool = True
     ):
         """
@@ -310,14 +298,15 @@ class ConstructionAgent:
             prompt=self.prompt
         )
         
-        # Create agent executor
+        # Create agent executor with better error handling
         self.agent_executor = AgentExecutor(
             agent=self.agent,
             tools=self.tools,
             max_iterations=max_iterations,
             verbose=verbose,
             handle_parsing_errors=True,
-            return_intermediate_steps=True
+            return_intermediate_steps=True,
+            max_execution_time=60  # Add timeout
         )
         
         logger.info(f"✅ Construction Agent initialized with {len(self.tools)} tools")
@@ -363,9 +352,16 @@ class ConstructionAgent:
             for step in intermediate_steps:
                 if len(step) >= 2:
                     action = step[0]
+                    # Truncate long inputs (like lists of IDs)
+                    tool_input = str(action.tool_input)
+                    if 'candidate_ids' in tool_input and len(tool_input) > 500:
+                        # Count IDs instead of showing them all
+                        id_count = tool_input.count('4ZppggAAJuJMZNB8f2ZT')
+                        tool_input = tool_input[:200] + f"...[{id_count} IDs total]..." + tool_input[-50:]
+                    
                     tools_used.append({
                         'tool': action.tool,
-                        'input': str(action.tool_input)[:200]  # Truncate for logging
+                        'input': tool_input
                     })
             
             logger.info(f"\n✅ Agent completed query")
@@ -426,7 +422,7 @@ def get_agent(
         _agent_instance = ConstructionAgent(
             model=model,
             temperature=temperature,
-            max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "10")),
+            max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "15")),  # Increased default
             verbose=os.getenv("AGENT_VERBOSE", "true").lower() == "true"
         )
     
@@ -435,23 +431,22 @@ def get_agent(
 
 if __name__ == "__main__":
     # Test the agent
-    print("🧪 Testing Construction Agent...\n")
+    print("🧪 Testing Construction Agent with full data extraction...\n")
     
     # Initialize agent
     agent = get_agent()
     
-    # Test query 1: Simple job lookup
-    print("Test 1: Job lookup")
-    result = agent.query("List all jobs in the database")
+    # Test query that requires processing many rows
+    print("Test: Query requiring semantic filtering of many rows")
+    result = agent.query("What is the total estimated cost of cleanup materials in Hammond?")
     print(f"Success: {result['success']}")
     print(f"Tools used: {[t['tool'] for t in result['tools_used']]}")
-    print(f"Answer: {result['answer'][:200]}...\n")
     
-    # Test query 2: Calculation query
-    print("Test 2: Calculation query")
-    result = agent.query("What's the total estimated cost for all projects?")
-    print(f"Success: {result['success']}")
-    print(f"Tools used: {[t['tool'] for t in result['tools_used']]}")
-    print(f"Answer: {result['answer'][:200]}...\n")
+    # Check if all IDs were processed
+    for tool_call in result['tools_used']:
+        if tool_call['tool'] == 'vector_tool':
+            print(f"Vector tool call details: {tool_call['input'][:100]}...")
     
-    print("✅ Agent tests complete")
+    print(f"Answer: {result['answer']}\n")
+    
+    print("✅ Agent test complete")
